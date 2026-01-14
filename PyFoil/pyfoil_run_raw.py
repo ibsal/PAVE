@@ -483,3 +483,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+//TODO surpress xfoil window popups. I want to continue working on stuff, but every new xfoil case launched pulls my mouse away
