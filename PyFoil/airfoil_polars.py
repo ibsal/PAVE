@@ -283,6 +283,38 @@ class Polar:
         coef, _, _, _ = np.linalg.lstsq(A, cl[m], rcond=None)
         return float(coef[0])  # per degree
 
+    def cdo_and_lift_slope(self, alpha_min: float = -2.0, alpha_max: float = 6.0) -> Tuple[float, float]:
+        a = np.asarray(self.alpha_deg, dtype=float)
+        cl = np.asarray(self.cl, dtype=float)
+        cd = np.asarray(self.cd, dtype=float)
+        m = _finite_mask(a, cl, cd) & (a >= alpha_min) & (a <= alpha_max)
+        if np.sum(m) < 3:
+            raise ValueError("Not enough points in the requested alpha window.")
+
+        a_m = a[m]
+        cl_m = cl[m]
+        cd_m = cd[m]
+
+        a_mean = a_m.mean()
+        cl_mean = cl_m.mean()
+        da = a_m - a_mean
+        denom = float(np.dot(da, da))
+        if denom == 0.0:
+            raise ValueError("Degenerate alpha window for lift slope.")
+        lift_slope = float(np.dot(da, cl_m - cl_mean) / denom)
+
+        x = cl_m * cl_m
+        x_mean = x.mean()
+        cd_mean = cd_m.mean()
+        dx = x - x_mean
+        denom_cd = float(np.dot(dx, dx))
+        if denom_cd == 0.0:
+            raise ValueError("Degenerate CL^2 window for Cdo fit.")
+        k = float(np.dot(dx, cd_m - cd_mean) / denom_cd)
+        cdo = float(cd_mean - k * x_mean)
+
+        return cdo, lift_slope
+
 
 # ---------------------------
 # PolarSet (multiple Reynolds)
@@ -410,6 +442,26 @@ class PolarSet:
         cls = np.array([self.cl(alpha_deg=float(a), reynolds=reynolds, clamp_re=clamp_re) for a in alphas], dtype=float)
         i = int(np.nanargmax(cls))
         return float(alphas[i]), float(cls[i])
+    
+
+    def cdo_and_lift_slope(
+        self,
+        *,
+        reynolds: float,
+        alpha_min: float = -2.0,
+        alpha_max: float = 6.0,
+        clamp_re: bool = True,
+    ) -> Tuple[float, float]:
+        cdo_vals = []
+        slope_vals = []
+        for p in self.polars:
+            cdo, slope = p.cdo_and_lift_slope(alpha_min=alpha_min, alpha_max=alpha_max)
+            cdo_vals.append(cdo)
+            slope_vals.append(slope)
+
+        cdo_i = self._interp_re(cdo_vals, reynolds, clamp=clamp_re)
+        slope_i = self._interp_re(slope_vals, reynolds, clamp=clamp_re)
+        return float(cdo_i), float(slope_i)
 
 
 # ---------------------------
@@ -458,3 +510,4 @@ if __name__ == "__main__":
     else:
         print("airfoil_polars.py: import Polar / PolarSet for programmatic use.")
         print("Demo: python airfoil_polars.py <folder> <airfoil_stem> <Re> <alpha>")
+

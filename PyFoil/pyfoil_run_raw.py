@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import time
@@ -225,25 +226,56 @@ def run_xfoil_popen(
     Run XFOIL with stdin from run_in_path. Kill if exceeds timeout.
     Returns (return_code, combined_output_text). return_code=124 indicates timeout killed.
     """
-    with run_in_path.open("r", encoding="utf-8", errors="ignore") as fin:
-        p = subprocess.Popen(
-            [str(xfoil_exe)],
-            cwd=str(workdir),
-            stdin=fin,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
+    script = run_in_path.read_text(encoding="utf-8", errors="ignore")
+    creationflags = 0
+    startupinfo = None
+    if os.name == "nt":
+        creationflags = (
+            subprocess.CREATE_NO_WINDOW
+            | subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP
         )
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+
         try:
-            out, _ = p.communicate(timeout=timeout_s)
-            return int(p.returncode or 0), out or ""
-        except subprocess.TimeoutExpired:
-            p.kill()
+            import ctypes
+            user32 = ctypes.windll.user32
+            prev_hwnd = user32.GetForegroundWindow()
+        except Exception:
+            prev_hwnd = 0
+
+    p = subprocess.Popen(
+        [str(xfoil_exe)],
+        cwd=str(workdir),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        creationflags=creationflags,
+        startupinfo=startupinfo,
+    )
+    if os.name == "nt" and prev_hwnd:
+        t_end = time.monotonic() + 1.5
+        while time.monotonic() < t_end:
             try:
-                out, _ = p.communicate(timeout=1.0)
+                if user32.GetForegroundWindow() != prev_hwnd:
+                    user32.SetForegroundWindow(prev_hwnd)
             except Exception:
-                out = ""
-            return 124, (out or "") + "\n[TIMEOUT]\n"
+                break
+            time.sleep(0.05)
+
+    try:
+        out, _ = p.communicate(input=script, timeout=timeout_s)
+        return int(p.returncode or 0), out or ""
+    except subprocess.TimeoutExpired:
+        p.kill()
+        try:
+            out, _ = p.communicate(timeout=1.0)
+        except Exception:
+            out = ""
+        return 124, (out or "") + "\n[TIMEOUT]\n"
 
 
 def build_extension_segments(last_alpha: float, alpha_max: float) -> List[Tuple[float, float, float]]:
@@ -290,8 +322,8 @@ def main() -> None:
     ap.add_argument("--alpha-max", type=float, default=22.0, help="Maximum alpha to attempt (deg).")
 
     # Timeouts (fast)
-    ap.add_argument("--timeout-base", type=float, default=6.0, help="Seconds per base run before kill.")
-    ap.add_argument("--timeout-ext", type=float, default=8.0, help="Seconds per extension run before kill.")
+    ap.add_argument("--timeout-base", type=float, default=10.0, help="Seconds per base run before kill.")
+    ap.add_argument("--timeout-ext", type=float, default=20.0, help="Seconds per extension run before kill.")
 
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--overwrite", action="store_true")
@@ -323,7 +355,7 @@ def main() -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    airfoils = sorted(airfoil_dir.glob("*.dat"))
+    airfoils = sorted(airfoil_dir.glob("*.dat"), reverse=True)
     if args.limit is not None:
         airfoils = airfoils[: args.limit]
     if not airfoils:
@@ -335,6 +367,24 @@ def main() -> None:
     total = len(airfoils) * len(args.res)
     done = 0
     t0 = time.time()
+    existing_final_sizes: Dict[str, int] = {}
+    if not args.overwrite:
+        try:
+            with os.scandir(out_dir) as it:
+                for entry in it:
+                    if not entry.is_file():
+                        continue
+                    name = entry.name
+                    if not name.endswith(".pol"):
+                        continue
+                    if name.endswith(".base.pol") or name.endswith(".ext.pol"):
+                        continue
+                    try:
+                        existing_final_sizes[name] = entry.stat().st_size
+                    except OSError:
+                        pass
+        except FileNotFoundError:
+            pass
 
     for af in airfoils:
         for Re in args.res:
@@ -346,7 +396,8 @@ def main() -> None:
             log_base = out_dir / f"{tag}.base.log"
             log_ext = out_dir / f"{tag}.ext.log"
 
-            if final_pol.exists() and not args.overwrite and final_pol.stat().st_size > 300:
+            size = existing_final_sizes.get(final_pol.name)
+            if size is not None and size > 300:
                 elapsed = time.time() - t0
                 avg = elapsed / max(1, done)
                 eta = avg * (total - done)
@@ -484,5 +535,3 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-
-//TODO surpress xfoil window popups. I want to continue working on stuff, but every new xfoil case launched pulls my mouse away
