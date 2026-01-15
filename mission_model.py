@@ -40,9 +40,11 @@ class MissionProfile:
     speed_opt_points: int = 10
     speed_opt_mode: str = "grid"
     n_span: int | None = None
-    foil_cache: dict | None = None
     power_margin_frac: float = 0.2
     elevator_limit_deg: float = 30.0
+    power_derate_frac: float | None = None
+    energy_reserve_frac: float | None = None
+    max_aoa_deg: float | None = None
 
 
 @dataclass
@@ -98,17 +100,23 @@ class AircraftModel:
         re_boom = rho * v * boom["length"] / mu
 
         components.append("Fuselage")
-        ff_list.append(1 + 60/((fuselage["length"]/fuselage["diameter"])**3) + (fuselage["length"]/fuselage["diameter"])/400)
+        fuse_ld = fuselage["length"] / fuselage["diameter"]
+        ff_list.append(1 + 60/(fuse_ld**3) + fuse_ld/400)
         q_list.append(1.0)
         cfc_list.append(skin_friction_cf(re_fuse, cfg["roughness"]["k"], fuselage["length"], laminar_frac=cfg["roughness"]["fuselage_lam"], re_crit_per_m=cfg["roughness"]["re_crit_per_m"]))
-        sratio_list.append((math.pi * fuselage["diameter"] * fuselage["length"] * math.pow((1 - 2/(fuselage["length"]/fuselage["diameter"])), 2.0/3.0) * (1 + 1/((fuselage["length"]/fuselage["diameter"])**2)))/wing["area"])
+        fuse_term = max(1.0 - 2.0 / max(fuse_ld, 1e-6), 0.0)
+        sratio_list.append((math.pi * fuselage["diameter"] * fuselage["length"] * math.pow(fuse_term, 2.0/3.0) * (1 + 1/(fuse_ld**2))) / wing["area"])
         re_list.append(re_fuse)
 
         components.append("Boom")
-        ff_list.append(boom["count"] * (1 + 60/((boom["length"]/boom["diameter"])**3) + (boom["length"]/boom["diameter"])/400))
+        boom_ld = boom["length"] / boom["diameter"]
+        boom_ff = 1 + 60/(boom_ld**3) + boom_ld/400
+        ff_list.append(boom_ff)
         q_list.append(1.0)
         cfc_list.append(skin_friction_cf(re_boom, cfg["roughness"]["k"], boom["length"], laminar_frac=cfg["roughness"]["boom_lam"], re_crit_per_m=cfg["roughness"]["re_crit_per_m"]))
-        sratio_list.append((math.pi * boom["diameter"] * boom["length"] * math.pow((1 - 2/(boom["length"]/boom["diameter"])), 2.0/3.0) * (1 + 1/((boom["length"]/boom["diameter"])**2)))/wing["area"])
+        boom_term = max(1.0 - 2.0 / max(boom_ld, 1e-6), 0.0)
+        boom_sratio = (math.pi * boom["diameter"] * boom["length"] * math.pow(boom_term, 2.0/3.0) * (1 + 1/(boom_ld**2))) / wing["area"]
+        sratio_list.append(boom_sratio * boom["count"])
         re_list.append(re_boom)
 
         cd_non_lifting = 0.0
@@ -128,7 +136,6 @@ class AircraftModel:
         integrate_profile_drag = cfg["aero_funcs"]["integrate_profile_drag"]
         sweep_correction_factor = cfg["aero_funcs"]["sweep_correction_factor"]
         integrate_pitching_moment_about_cg = cfg["aero_funcs"]["integrate_pitching_moment_about_cg"]
-        foil_cache = cfg.get("foil_cache")
 
         alpha = flight_aoa + wing["incidence"]
 
@@ -146,7 +153,6 @@ class AircraftModel:
             symmetric=True,
             chord_breaks=wing["chord_breaks"],
             sweep_breaks=wing["sweep_breaks"],
-            foil_cache=foil_cache,
         )
 
         e_oswald_w = 1.78*(1.0 - 0.045*(wing["ar"]**0.68)) - 0.64
@@ -169,9 +175,7 @@ class AircraftModel:
             symmetric=False,
             chord_breaks=vtail["chord_breaks"],
             sweep_breaks=vtail["sweep_breaks"],
-            foil_cache=foil_cache,
         )
-        cd_vtail *= cfg["tail_efficiency"]
 
         downwash = alpha * cfg["downwash_factor"]
         htail_aoa = flight_aoa + htail["incidence"] - downwash + cfg["elevator_tau"] * elevator_deflection
@@ -189,7 +193,6 @@ class AircraftModel:
             symmetric=True,
             chord_breaks=htail["chord_breaks"],
             sweep_breaks=htail["sweep_breaks"],
-            foil_cache=foil_cache,
         )
         cd_htail *= cfg["tail_efficiency"]
         cl_htail *= cfg["tail_efficiency"]
@@ -197,11 +200,13 @@ class AircraftModel:
         e_oswald_h = 1.78*(1.0 - 0.045*(htail["ar"]**0.68)) - 0.64
         e_oswald_h = min(max(e_oswald_h, 0.3), 0.95)
         har_eff = htail["ar"] * sweep_correction_factor(htail["span"], cfg["n_span"], True, htail["sweep_breaks"])
-        cd_htail_induced = (cl_htail**2) * (wing["area"] / htail["area"]) / (math.pi * har_eff * e_oswald_h * cfg["tail_efficiency"])
+        cd_htail_induced = (cl_htail**2) * (wing["area"] / htail["area"]) / (math.pi * har_eff * e_oswald_h)
 
         cd_non_lifting, _, _, _, _ = self.non_lifting_drag_stack(rho, mu, v)
 
-        cd_total = cd_w_induced + cfg["cd_misc"] + cd_profile + cd_non_lifting + cd_vtail + cd_htail + cd_htail_induced
+        cd0 = cfg["cd_misc"] + cd_profile + cd_non_lifting + cd_vtail + cd_htail
+        cd_induced = cd_w_induced + cd_htail_induced
+        cd_total = cd0 + cd_induced
 
         q_dyn = 0.5 * rho * (v ** 2)
         lift = q_dyn * wing["area"] * (cl + cl_htail)
@@ -223,7 +228,6 @@ class AircraftModel:
             symmetric=True,
             chord_breaks=wing["chord_breaks"],
             sweep_breaks=wing["sweep_breaks"],
-            foil_cache=foil_cache,
         )
         htail_moment, htail_cm_moment = integrate_pitching_moment_about_cg(
             htail["foil"],
@@ -241,7 +245,6 @@ class AircraftModel:
             symmetric=True,
             chord_breaks=htail["chord_breaks"],
             sweep_breaks=htail["sweep_breaks"],
-            foil_cache=foil_cache,
         )
         htail_moment *= cfg["tail_efficiency"]
         htail_cm_moment *= cfg["tail_efficiency"]
@@ -252,17 +255,38 @@ class AircraftModel:
             "Drag": drag,
             "TotalPitchMoment": total_moment,
             "Cl": cl,
+            "ClTail": cl_htail,
+            "ClTotal": cl + cl_htail,
             "Cd": cd_total,
+            "Cd0": cd0,
+            "CdInduced": cd_induced,
             "HTailAOA": htail_aoa,
         }
 
-    def trim(self, v, rho, mu, weight, aoa_guess, elev_guess, max_iter=20, tol_force=1e-3, tol_moment=1e-3, elevator_limit_deg=None):
+    def trim(self, v, rho, mu, weight, aoa_guess, elev_guess, max_iter=20, tol_force=1e-3, tol_moment=1e-3, elevator_limit_deg=None, aoa_min_deg=None, aoa_max_deg=None):
         aoa = aoa_guess
         elev = elev_guess
+        aoa_clamped = False
+        elev_clamped = False
         if elevator_limit_deg is not None:
-            elev = max(min(elev, elevator_limit_deg), -elevator_limit_deg)
+            elev_new = max(min(elev, elevator_limit_deg), -elevator_limit_deg)
+            elev_clamped = elev_clamped or (elev_new != elev)
+            elev = elev_new
+        if aoa_min_deg is not None:
+            aoa_new = max(aoa, aoa_min_deg)
+            aoa_clamped = aoa_clamped or (aoa_new != aoa)
+            aoa = aoa_new
+        if aoa_max_deg is not None:
+            aoa_new = min(aoa, aoa_max_deg)
+            aoa_clamped = aoa_clamped or (aoa_new != aoa)
+            aoa = aoa_new
         converged = False
         last_result = None
+        force_tol = max(tol_force, 1e-3 * max(weight, 0.0))
+        moment_scale = max(weight, 0.0) * self.config["wing"]["mac"]
+        moment_tol = max(tol_moment, 1e-3 * moment_scale)
+        last_f1 = None
+        last_f2 = None
         for _ in range(max_iter):
             result = self.aero(aoa, elev, v, rho, mu)
             result = dict(result)
@@ -271,7 +295,9 @@ class AircraftModel:
             last_result = result
             f1 = result["Lift"] - weight
             f2 = result["TotalPitchMoment"]
-            if abs(f1) < tol_force and abs(f2) < tol_moment:
+            last_f1 = f1
+            last_f2 = f2
+            if abs(f1) < force_tol and abs(f2) < moment_tol:
                 converged = True
                 break
             d_aoa = 0.25
@@ -294,18 +320,79 @@ class AircraftModel:
             aoa += delta_aoa
             elev += delta_elev
             if elevator_limit_deg is not None:
-                elev = max(min(elev, elevator_limit_deg), -elevator_limit_deg)
+                elev_new = max(min(elev, elevator_limit_deg), -elevator_limit_deg)
+                elev_clamped = elev_clamped or (elev_new != elev)
+                elev = elev_new
+            if aoa_min_deg is not None:
+                aoa_new = max(aoa, aoa_min_deg)
+                aoa_clamped = aoa_clamped or (aoa_new != aoa)
+                aoa = aoa_new
+            if aoa_max_deg is not None:
+                aoa_new = min(aoa, aoa_max_deg)
+                aoa_clamped = aoa_clamped or (aoa_new != aoa)
+                aoa = aoa_new
+        if last_result is not None:
+            last_result["Converged"] = converged
+            last_result["AoaClamped"] = aoa_clamped
+            last_result["ElevatorClamped"] = elev_clamped
+            last_result["LiftResidual"] = last_f1 if last_f1 is not None else 0.0
+            last_result["MomentResidual"] = last_f2 if last_f2 is not None else 0.0
         return aoa, elev, converged, last_result
+
+    def trim_with_fixed_elevator(self, v, rho, mu, weight, elevator_deg, aoa_guess=2.0, max_iter=8, tol_force=1e-3, aoa_min_deg=None, aoa_max_deg=None):
+        aoa = aoa_guess
+        aoa_clamped = False
+        if aoa_min_deg is not None:
+            aoa_new = max(aoa, aoa_min_deg)
+            aoa_clamped = aoa_clamped or (aoa_new != aoa)
+            aoa = aoa_new
+        if aoa_max_deg is not None:
+            aoa_new = min(aoa, aoa_max_deg)
+            aoa_clamped = aoa_clamped or (aoa_new != aoa)
+            aoa = aoa_new
+        last_result = None
+        force_tol = max(tol_force, 1e-3 * max(weight, 0.0))
+        last_f1 = None
+        for _ in range(max_iter):
+            result = self.aero(aoa, elevator_deg, v, rho, mu)
+            result = dict(result)
+            result["AOA"] = aoa
+            result["ElevatorDeg"] = elevator_deg
+            last_result = result
+            f1 = result["Lift"] - weight
+            last_f1 = f1
+            if abs(f1) < force_tol:
+                result["Converged"] = True
+                return aoa, True, last_result
+            d_aoa = 0.25
+            result_aoa = self.aero(aoa + d_aoa, elevator_deg, v, rho, mu)
+            f1_aoa = result_aoa["Lift"] - weight
+            j11 = (f1_aoa - f1) / d_aoa
+            if abs(j11) < 1e-9:
+                break
+            aoa -= f1 / j11
+            if aoa_min_deg is not None:
+                aoa_new = max(aoa, aoa_min_deg)
+                aoa_clamped = aoa_clamped or (aoa_new != aoa)
+                aoa = aoa_new
+            if aoa_max_deg is not None:
+                aoa_new = min(aoa, aoa_max_deg)
+                aoa_clamped = aoa_clamped or (aoa_new != aoa)
+                aoa = aoa_new
+        if last_result is not None:
+            last_result["Converged"] = False
+            last_result["AoaClamped"] = aoa_clamped
+            last_result["ElevatorClamped"] = False
+            last_result["LiftResidual"] = last_f1 if last_f1 is not None else 0.0
+            last_result["MomentResidual"] = 0.0
+        return aoa, False, last_result
 
 
 def simulate_mission(model, profile, initial_alt, return_summary=False):
     cfg = model.config
     orig_n_span = cfg.get("n_span")
-    orig_foil_cache = cfg.get("foil_cache")
     if profile.n_span is not None:
         cfg["n_span"] = profile.n_span
-    if profile.foil_cache is not None:
-        cfg["foil_cache"] = profile.foil_cache
     state = MissionState(
         t=0.0,
         x=0.0,
@@ -318,10 +405,6 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
     )
     history = [state]
     orbit_time = 0.0
-    last_trim = None
-    last_trim_time = -1.0
-    last_trim_phase = None
-    last_trim_v = None
     segment_index = 0
     segment_time = 0.0
     segment_distance = 0.0
@@ -338,30 +421,58 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
     takeoff_step = 0
     last_takeoff_aero = None
     last_takeoff_v = 0.1
-    trim_cache = {}
-    opt_speed_cache = {}
     segment_time_limit = {}
+    segment_elevator_lock = {}
     segment_summaries = []
+    loiter_accum = {}
     segment_start_energy = None
     segment_start_x = None
     segment_start_t = None
     segment_label = "takeoff"
     current_segment_index = None
+    segment_kind = "takeoff"
+    last_thrust_used = 0.0
+    cruise_trim_segment_index = None
+    cruise_trim_v = None
+    cruise_trim_result = None
+    cruise_trim_gamma = 0.0
+    cruise_trim_thrust = 0.0
 
-    power_margin = max(0.0, min(profile.power_margin_frac, 0.9))
-    power_limit = cfg["propulsion"]["max_power_w"] * (1.0 - power_margin)
+    def foil_alpha_limits(foil):
+        if hasattr(foil, "polars"):
+            mins = [float(min(p.alpha_deg)) for p in foil.polars]
+            maxs = [float(max(p.alpha_deg)) for p in foil.polars]
+            return min(mins), max(maxs)
+        if hasattr(foil, "alpha_deg"):
+            return float(min(foil.alpha_deg)), float(max(foil.alpha_deg))
+        return None, None
+
+    aoa_min_deg, aoa_max_deg = foil_alpha_limits(cfg["wing"]["foil"])
+    wing_incidence = cfg["wing"]["incidence"]
+    if aoa_min_deg is not None:
+        aoa_min_deg -= wing_incidence
+    if aoa_max_deg is not None:
+        aoa_max_deg -= wing_incidence
+    if profile.max_aoa_deg is not None:
+        aoa_max_deg = profile.max_aoa_deg
+
+    power_derate = profile.power_derate_frac
+    energy_reserve = profile.energy_reserve_frac
+    if power_derate is None and energy_reserve is None:
+        power_derate = 0.0
+        energy_reserve = profile.power_margin_frac
+    if power_derate is None:
+        power_derate = 0.0
+    if energy_reserve is None:
+        energy_reserve = profile.power_margin_frac
+    power_derate = max(0.0, min(power_derate, 0.9))
+    energy_reserve = max(0.0, min(energy_reserve, 0.9))
+    power_limit = cfg["propulsion"]["max_power_w"] * (1.0 - power_derate)
 
     def available_thrust(v, rho):
         return model.thrust_available(v, rho, power_limit_w=power_limit)
 
-    def trim_key(v, weight_eff, bank_deg):
-        return (round(v, 2), round(weight_eff, 1), round(math.degrees(bank_deg), 1))
-
-    def cached_trim(v, rho, mu, weight_eff, bank_deg, max_iter):
-        key = trim_key(v, weight_eff, bank_deg)
-        cached = trim_cache.get(key)
-        if cached is not None:
-            return cached
+    def solve_trim(v, rho, mu, weight_eff, max_iter):
         _, _, _, trim_result = model.trim(
             v,
             rho,
@@ -371,8 +482,22 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
             0.0,
             max_iter=max_iter,
             elevator_limit_deg=profile.elevator_limit_deg,
+            aoa_min_deg=aoa_min_deg,
+            aoa_max_deg=aoa_max_deg,
         )
-        trim_cache[key] = trim_result
+        return trim_result
+
+    def solve_trim_fixed_elevator(v, rho, mu, weight_eff, elevator_deg, max_iter):
+        _, _, trim_result = model.trim_with_fixed_elevator(
+            v,
+            rho,
+            mu,
+            weight_eff,
+            elevator_deg,
+            max_iter=max_iter,
+            aoa_min_deg=aoa_min_deg,
+            aoa_max_deg=aoa_max_deg,
+        )
         return trim_result
 
     def trim_with_gamma(v, rho, mu, weight, bank_deg, thrust_scale):
@@ -381,13 +506,32 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
         for _ in range(profile.trim_gamma_iters):
             load_factor = 1.0 / max(math.cos(bank_deg), 0.1)
             weight_eff = weight * load_factor * math.cos(gamma)
-            trim_result = cached_trim(v, rho, mu, weight_eff, bank_deg, profile.trim_max_iter)
+            trim_result = solve_trim(v, rho, mu, weight_eff, profile.trim_max_iter)
             thrust = available_thrust(v, rho) * thrust_scale
             drag = trim_result["Drag"]
             gamma = math.asin(max(min((thrust - drag) / weight, 0.3), -0.3))
         return gamma, trim_result
 
-    def optimize_speed(v_min, v_max, mode, weight_eff, thrust_scale):
+    def trim_with_gamma_fixed_elevator(v, rho, mu, weight, bank_deg, thrust_scale, elevator_deg):
+        gamma = last_gamma
+        trim_result = None
+        for _ in range(profile.trim_gamma_iters):
+            load_factor = 1.0 / max(math.cos(bank_deg), 0.1)
+            weight_eff = weight * load_factor * math.cos(gamma)
+            trim_result = solve_trim_fixed_elevator(
+                v,
+                rho,
+                mu,
+                weight_eff,
+                elevator_deg,
+                profile.trim_max_iter_opt,
+            )
+            thrust = available_thrust(v, rho) * thrust_scale
+            drag = trim_result["Drag"]
+            gamma = math.asin(max(min((thrust - drag) / weight, 0.3), -0.3))
+        return gamma, trim_result
+
+    def optimize_speed(v_min, v_max, mode, weight_eff, thrust_scale, elevator_deg=None):
         if v_min is None or v_max is None or v_max <= v_min:
             return v_min if v_min is not None else max(state.v, 0.1)
         best_v = v_min
@@ -398,13 +542,23 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
         else:
             samples = [v_min + (v_max - v_min) * i / (points - 1) for i in range(points)]
         for v in samples:
-            trim_result = cached_trim(v, rho, mu, weight_eff, 0.0, profile.trim_max_iter_opt)
+            if elevator_deg is None:
+                trim_result = solve_trim(v, rho, mu, weight_eff, profile.trim_max_iter_opt)
+            else:
+                trim_result = solve_trim_fixed_elevator(
+                    v,
+                    rho,
+                    mu,
+                    weight_eff,
+                    elevator_deg,
+                    profile.trim_max_iter_opt,
+                )
             drag = trim_result["Drag"]
             thrust = available_thrust(v, rho) * thrust_scale
             if mode == "max_roc":
                 metric = (thrust - drag) * v
             elif mode == "min_energy":
-                metric = -drag * v
+                metric = -drag
             elif mode == "max_endurance":
                 metric = -drag * v
             elif mode == "min_time":
@@ -422,9 +576,9 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
         htail = cfg["htail"]
         vtail = cfg["vtail"]
         integrate_profile_drag = cfg["aero_funcs"]["integrate_profile_drag"]
-        foil_cache = cfg.get("foil_cache")
 
-        alpha = wing["incidence"]
+        flight_aoa = -wing["incidence"]
+        alpha = flight_aoa + wing["incidence"]
         cd_profile, _, _ = integrate_profile_drag(
             wing["foil"],
             wing["root_chord"],
@@ -439,7 +593,6 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
             symmetric=True,
             chord_breaks=wing["chord_breaks"],
             sweep_breaks=wing["sweep_breaks"],
-            foil_cache=foil_cache,
         )
 
         cd_vtail, _, _ = integrate_profile_drag(
@@ -457,12 +610,10 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
             symmetric=False,
             chord_breaks=vtail["chord_breaks"],
             sweep_breaks=vtail["sweep_breaks"],
-            foil_cache=foil_cache,
         )
-        cd_vtail *= cfg["tail_efficiency"]
 
         downwash = alpha * cfg["downwash_factor"]
-        htail_aoa = htail["incidence"] - downwash
+        htail_aoa = flight_aoa + htail["incidence"] - downwash
         cd_htail, _, _ = integrate_profile_drag(
             htail["foil"],
             htail["root_chord"],
@@ -477,15 +628,15 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
             symmetric=True,
             chord_breaks=htail["chord_breaks"],
             sweep_breaks=htail["sweep_breaks"],
-            foil_cache=foil_cache,
         )
         cd_htail *= cfg["tail_efficiency"]
 
         cd_non_lifting, _, _, _, _ = model.non_lifting_drag_stack(rho, mu, v)
         return cd_non_lifting + cd_profile + cd_vtail + cd_htail + cfg["cd_misc"]
 
-    def endurance_speed_from_eq(weight_eff, rho, v_seed):
+    def endurance_speed_from_eq(weight, rho, v_seed, load_factor=1.0):
         wing = cfg["wing"]
+        weight_eff = weight * load_factor
         ar = wing["ar"]
         e_oswald = 1.78 * (1.0 - 0.045 * (ar ** 0.68)) - 0.64
         e_oswald = min(max(e_oswald, 0.3), 0.95)
@@ -495,6 +646,61 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
             cd0 = estimate_cd0_total(rho, mu, v)
             v = math.sqrt((2.0 * weight_eff / (rho * wing["area"])) * math.sqrt(k / (3.0 * cd0)))
         return v
+
+    def update_loiter_metrics(seg_index, dt, trim_result, v, rho):
+        if trim_result is None:
+            return
+        acc = loiter_accum.setdefault(seg_index, {
+            "time_s": 0.0,
+            "cl_sum": 0.0,
+            "cd_sum": 0.0,
+            "cdo_sum": 0.0,
+            "ld_sum": 0.0,
+            "lift_sum": 0.0,
+            "drag_sum": 0.0,
+            "aoa_sum": 0.0,
+            "elev_sum": 0.0,
+            "samples": 0,
+        })
+        q_dyn = 0.5 * rho * (v ** 2)
+        cl_total = trim_result.get("ClTotal")
+        if cl_total is None:
+            cl_total = trim_result["Lift"] / (q_dyn * cfg["wing"]["area"])
+        cd_total = trim_result.get("Cd")
+        if cd_total is None:
+            cd_total = trim_result["Drag"] / (q_dyn * cfg["wing"]["area"])
+        cdo = trim_result.get("Cd0", 0.0)
+        lift = trim_result.get("Lift", 0.0)
+        drag = trim_result.get("Drag", 0.0)
+        ld = (lift / drag) if drag > 0.0 else 0.0
+        aoa = trim_result.get("AOA", 0.0)
+        elev = trim_result.get("ElevatorDeg", 0.0)
+        acc["time_s"] += dt
+        acc["cl_sum"] += cl_total * dt
+        acc["cd_sum"] += cd_total * dt
+        acc["cdo_sum"] += cdo * dt
+        acc["ld_sum"] += ld * dt
+        acc["lift_sum"] += lift * dt
+        acc["drag_sum"] += drag * dt
+        acc["aoa_sum"] += aoa * dt
+        acc["elev_sum"] += elev * dt
+        acc["samples"] += 1
+
+    def loiter_summary(seg_index):
+        acc = loiter_accum.get(seg_index)
+        if not acc or acc["time_s"] <= 0.0:
+            return {}
+        t = acc["time_s"]
+        return {
+            "aoa_deg": acc["aoa_sum"] / t,
+            "elev_deg": acc["elev_sum"] / t,
+            "cl_avg": acc["cl_sum"] / t,
+            "cd_avg": acc["cd_sum"] / t,
+            "cdo_avg": acc["cdo_sum"] / t,
+            "ld_avg": acc["ld_sum"] / t,
+            "lift_avg_n": acc["lift_sum"] / t,
+            "drag_avg_n": acc["drag_sum"] / t,
+        }
 
     try:
         segment_start_energy = state.energy_j
@@ -508,6 +714,7 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
             prev_segment_index = segment_index
 
             step_dt = profile.dt
+            thrust_used = 0.0
             if state.phase == "takeoff":
                 takeoff_step += 1
                 if profile.takeoff_dt is not None:
@@ -538,9 +745,9 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                 thrust = available_thrust(max(state.v, 0.1), rho)
                 mass = state.weight / 9.81
                 normal = max(state.weight - lift, 0.0)
-                accel = (max(thrust - drag - profile.takeoff_mu * normal,0)) / mass
+                accel = (thrust - drag - profile.takeoff_mu * normal) / mass
                 v_next = max(state.v + accel * step_dt, 0.0)
-                x_next = state.x + v_next * step_dt
+                x_next = state.x + 0.5 * (state.v + v_next) * step_dt
                 if eval_aero or v_next >= v_min_takeoff:
                     aero_next = model.aero(profile.takeoff_aoa, takeoff_elevator, max(v_next, 0.1), rho, mu)
                     lift_next = aero_next["Lift"]
@@ -566,6 +773,7 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                     phase = "takeoff"
                 h_next = state.h
                 gamma_next = 0.0
+                thrust_used = available_thrust(max(v_next, 0.1), rho)
             else:
                 if segments:
                     if segment_index >= len(segments):
@@ -582,146 +790,247 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                     bank_rad = math.radians(seg.bank_deg)
                     load_factor = 1.0 / max(math.cos(bank_rad), 0.1)
                     weight_eff = state.weight * load_factor
-    
-                    trim_key_id = (seg.kind, v_next, seg.bank_deg)
-                    if seg.kind in ("cruise", "loiter"):
-                        trim_needed = (
-                            last_trim is None
-                            or last_trim_phase != trim_key_id
-                            or last_trim_v is None
-                            or abs(last_trim_v - v_next) > 0.1
-                        )
-                    else:
-                        trim_needed = (
-                            last_trim is None
-                            or last_trim_phase != trim_key_id
-                            or last_trim_v is None
-                            or abs(last_trim_v - v_next) > 0.1
-                            or (state.t - last_trim_time) > profile.trim_update_dt
-                        )
-                    if seg.elevator_deg is not None:
-                        trim_needed = False
-                        trim_result = model.aero(0.0, seg.elevator_deg, v_next, rho, mu)
-                        trim_result = dict(trim_result)
-                        trim_result["AOA"] = 0.0
-                        trim_result["ElevatorDeg"] = seg.elevator_deg
-                    else:
-                        if trim_needed:
-                            trim_result = cached_trim(v_next, rho, mu, weight_eff, bank_rad, profile.trim_max_iter)
-                            last_trim = trim_result
-                            last_trim_time = state.t
-                            last_trim_phase = trim_key_id
-                            last_trim_v = v_next
-                        else:
-                            trim_result = last_trim
-                    last_aero = trim_result
+                    stall_weight = weight_eff * max(math.cos(last_gamma), 0.1)
     
                     if seg.kind == "climb_to":
                         cl_max = cfg["wing"]["cl_max_cruise"]
-                        v_stall = math.sqrt(2.0 * weight_eff / (rho * cfg["wing"]["area"] * cl_max))
+                        v_stall = math.sqrt(2.0 * stall_weight / (rho * cfg["wing"]["area"] * cl_max))
                         v_min = profile.takeoff_climb_margin * v_stall
                         v_max = seg.speed_max if seg.speed_max is not None else max(v_min * 2.0, v_min + 1.0)
+                        elevator_lock = None
+                        if seg.mode is not None and seg.speed is None and seg.elevator_deg is None:
+                            elevator_lock = segment_elevator_lock.get(segment_index)
                         if seg.mode is not None and seg.speed is None:
-                            if segment_index in opt_speed_cache:
-                                v_next = opt_speed_cache[segment_index]
-                            else:
-                                v_next = optimize_speed(v_min, v_max, seg.mode, weight_eff, 1.0)
-                                opt_speed_cache[segment_index] = v_next
+                            v_next = optimize_speed(v_min, v_max, seg.mode, weight_eff, 1.0, elevator_deg=elevator_lock)
                         elif v_next < v_min:
                             v_next = v_min
+                        thrust_available = available_thrust(max(v_next, 0.1), rho)
                         if seg.elevator_deg is not None:
-                            thrust = available_thrust(v_next, rho)
-                            drag = trim_result["Drag"]
-                            gamma_next = math.asin(max(min((thrust - drag) / state.weight, 0.3), -0.3))
-                        elif trim_needed:
-                            gamma_next, trim_result = trim_with_gamma(v_next, rho, mu, state.weight, bank_rad, 1.0)
-                            last_trim = trim_result
+                            gamma_next, trim_result = trim_with_gamma_fixed_elevator(
+                                v_next,
+                                rho,
+                                mu,
+                                state.weight,
+                                bank_rad,
+                                1.0,
+                                seg.elevator_deg,
+                            )
+                            last_aero = trim_result
+                            thrust_used = thrust_available
+                        elif elevator_lock is not None:
+                            gamma_next, trim_result = trim_with_gamma_fixed_elevator(
+                                v_next,
+                                rho,
+                                mu,
+                                state.weight,
+                                bank_rad,
+                                1.0,
+                                elevator_lock,
+                            )
+                            last_aero = trim_result
+                            thrust_used = thrust_available
                         else:
-                            thrust = available_thrust(v_next, rho)
-                            drag = trim_result["Drag"]
-                            gamma_next = math.asin(max(min((thrust - drag) / state.weight, 0.3), -0.3))
+                            gamma_next, trim_result = trim_with_gamma(v_next, rho, mu, state.weight, bank_rad, 1.0)
+                            last_aero = trim_result
+                            thrust_used = thrust_available
+                            if seg.mode is not None and seg.speed is None:
+                                locked_elev = trim_result.get("ElevatorDeg") if trim_result else None
+                                if locked_elev is not None:
+                                    segment_elevator_lock[segment_index] = locked_elev
                         h_next = state.h + v_next * math.sin(gamma_next) * step_dt
                         x_next = state.x + v_next * math.cos(gamma_next) * step_dt
                         phase = seg.kind if h_next < seg.target_alt else "segment_done"
                     elif seg.kind == "descent_to":
                         cl_max = cfg["wing"]["cl_max_cruise"]
-                        v_stall = math.sqrt(2.0 * weight_eff / (rho * cfg["wing"]["area"] * cl_max))
+                        v_stall = math.sqrt(2.0 * stall_weight / (rho * cfg["wing"]["area"] * cl_max))
                         v_min = profile.level_flight_stall_margin * v_stall
                         v_max = seg.speed_max if seg.speed_max is not None else max(v_min * 2.0, v_min + 1.0)
+                        elevator_lock = None
+                        if seg.mode is not None and seg.speed is None and seg.elevator_deg is None:
+                            elevator_lock = segment_elevator_lock.get(segment_index)
                         if seg.mode is not None and seg.speed is None:
-                            if segment_index in opt_speed_cache:
-                                v_next = opt_speed_cache[segment_index]
-                            else:
-                                v_next = optimize_speed(v_min, v_max, seg.mode, weight_eff, 0.2)
-                                opt_speed_cache[segment_index] = v_next
+                            v_next = optimize_speed(v_min, v_max, seg.mode, weight_eff, 0.2, elevator_deg=elevator_lock)
                         elif v_next < v_min:
                             v_next = v_min
+                        thrust_available = available_thrust(max(v_next, 0.1), rho)
                         thrust_scale = seg.thrust_scale if seg.thrust_scale is not None else 0.2
                         if seg.elevator_deg is not None:
-                            thrust = available_thrust(v_next, rho) * thrust_scale
-                            drag = trim_result["Drag"]
-                            gamma_next = math.asin(max(min((thrust - drag) / state.weight, 0.0), -0.3))
-                        elif trim_needed:
-                            gamma_next, trim_result = trim_with_gamma(v_next, rho, mu, state.weight, bank_rad, thrust_scale)
-                            last_trim = trim_result
+                            gamma_next, trim_result = trim_with_gamma_fixed_elevator(
+                                v_next,
+                                rho,
+                                mu,
+                                state.weight,
+                                bank_rad,
+                                thrust_scale,
+                                seg.elevator_deg,
+                            )
+                            last_aero = trim_result
+                            thrust_used = thrust_available * thrust_scale
+                        elif elevator_lock is not None:
+                            gamma_next, trim_result = trim_with_gamma_fixed_elevator(
+                                v_next,
+                                rho,
+                                mu,
+                                state.weight,
+                                bank_rad,
+                                thrust_scale,
+                                elevator_lock,
+                            )
+                            last_aero = trim_result
+                            thrust_used = thrust_available * thrust_scale
                         else:
-                            thrust = available_thrust(v_next, rho) * thrust_scale
-                            drag = trim_result["Drag"]
-                            gamma_next = math.asin(max(min((thrust - drag) / state.weight, 0.0), -0.3))
+                            gamma_next, trim_result = trim_with_gamma(v_next, rho, mu, state.weight, bank_rad, thrust_scale)
+                            last_aero = trim_result
+                            thrust_used = thrust_available * thrust_scale
+                            if seg.mode is not None and seg.speed is None:
+                                locked_elev = trim_result.get("ElevatorDeg") if trim_result else None
+                                if locked_elev is not None:
+                                    segment_elevator_lock[segment_index] = locked_elev
                         h_next = max(state.h + v_next * math.sin(gamma_next) * step_dt, seg.target_alt)
                         x_next = state.x + v_next * math.cos(gamma_next) * step_dt
                         phase = "segment_done" if h_next <= seg.target_alt else seg.kind
-                elif seg.kind in ("cruise", "loiter"):
-                    cl_max = cfg["wing"]["cl_max_cruise"]
-                    v_stall = math.sqrt(2.0 * weight_eff / (rho * cfg["wing"]["area"] * cl_max))
-                    v_min = profile.level_flight_stall_margin * v_stall
-                    v_max = seg.speed_max if seg.speed_max is not None else max(v_min * 2.0, v_min + 1.0)
-                    if seg.mode is not None and seg.speed is None:
-                        if segment_index in opt_speed_cache:
-                            v_next = opt_speed_cache[segment_index]
-                        else:
-                            if seg.mode == "max_endurance_eq":
-                                v_next = endurance_speed_from_eq(weight_eff, rho, v_min)
+                    elif seg.kind in ("cruise", "loiter"):
+                        if cruise_trim_segment_index != segment_index:
+                            cl_max = cfg["wing"]["cl_max_cruise"]
+                            v_stall = math.sqrt(2.0 * weight_eff / (rho * cfg["wing"]["area"] * cl_max))
+                            v_min = profile.level_flight_stall_margin * v_stall
+                            v_max = seg.speed_max if seg.speed_max is not None else max(v_min * 2.0, v_min + 1.0)
+                            if seg.mode is not None and seg.speed is None:
+                                if seg.mode == "max_endurance_eq":
+                                    v_next = endurance_speed_from_eq(state.weight, rho, v_min, load_factor)
+                                else:
+                                    v_next = optimize_speed(v_min, v_max, seg.mode, weight_eff, 1.0)
+                            if v_next < v_min:
+                                v_next = v_min
+                            if v_next > v_max:
+                                v_next = v_max
+                            if seg.elevator_deg is not None:
+                                trim_result = solve_trim_fixed_elevator(
+                                    v_next,
+                                    rho,
+                                    mu,
+                                    weight_eff,
+                                    seg.elevator_deg,
+                                    profile.trim_max_iter_opt,
+                                )
                             else:
-                                v_next = optimize_speed(v_min, v_max, seg.mode, weight_eff, 1.0)
-                            opt_speed_cache[segment_index] = v_next
-                    if v_next < v_min:
-                        v_next = v_min
-                    if v_next > v_max:
-                        v_next = v_max
-                    gamma_next = 0.0
-                    h_next = state.h if seg.target_alt is None else seg.target_alt
-                    x_next = state.x + v_next * step_dt
-                    segment_time += step_dt
-                    segment_distance += v_next * step_dt
-                    time_limit = seg.time
-                    if seg.kind == "loiter" and seg.mode == "max_endurance_eq" and seg.time is None and seg.distance is None:
-                        if segment_index not in segment_time_limit:
-                            energy_reserve = cfg["propulsion"]["battery_energy_j"] * power_margin
-                            available_energy = max(state.energy_j - energy_reserve, 0.0)
-                            power_required = max(trim_result["Drag"], 0.0) * v_next / cfg["propulsion"]["prop_eff"]
-                            power_used = max(min(power_required, power_limit), 1e-6)
-                            segment_time_limit[segment_index] = available_energy / power_used
-                        time_limit = segment_time_limit[segment_index]
-                    if seg.distance is not None:
-                        phase = "segment_done" if segment_distance >= seg.distance else seg.kind
+                                trim_result = solve_trim(v_next, rho, mu, weight_eff, profile.trim_max_iter_opt)
+                            if seg.speed is None:
+                                lift_tol = 1e-3 * max(weight_eff, 1.0)
+                                for _ in range(10):
+                                    aoa = trim_result.get("AOA")
+                                    converged = trim_result.get("Converged", True)
+                                    lift = trim_result.get("Lift", 0.0)
+                                    aoa_violation = aoa_max_deg is not None and (aoa is None or aoa > aoa_max_deg)
+                                    if converged and abs(lift - weight_eff) <= lift_tol and not aoa_violation:
+                                        break
+                                    if lift > 0.0:
+                                        v_new = v_next * math.sqrt(weight_eff / lift)
+                                    else:
+                                        v_new = v_next + 1.0
+                                    if aoa_violation or not converged:
+                                        v_new = max(v_new, v_next + 0.5)
+                                    v_new = max(min(v_new, v_max), v_min)
+                                    if abs(v_new - v_next) < 0.05:
+                                        break
+                                    v_next = v_new
+                                    if seg.elevator_deg is not None:
+                                        trim_result = solve_trim_fixed_elevator(
+                                            v_next,
+                                            rho,
+                                            mu,
+                                            weight_eff,
+                                            seg.elevator_deg,
+                                            profile.trim_max_iter_opt,
+                                        )
+                                    else:
+                                        trim_result = solve_trim(v_next, rho, mu, weight_eff, profile.trim_max_iter_opt)
+                            thrust_available = available_thrust(max(v_next, 0.1), rho)
+                            drag = trim_result["Drag"]
+                            if drag > thrust_available:
+                                if seg.elevator_deg is not None:
+                                    gamma_next, trim_result = trim_with_gamma_fixed_elevator(
+                                        v_next,
+                                        rho,
+                                        mu,
+                                        state.weight,
+                                        bank_rad,
+                                        1.0,
+                                        seg.elevator_deg,
+                                    )
+                                else:
+                                    gamma_next, trim_result = trim_with_gamma(
+                                        v_next,
+                                        rho,
+                                        mu,
+                                        state.weight,
+                                        bank_rad,
+                                        1.0,
+                                    )
+                                thrust_used = thrust_available
+                            else:
+                                gamma_next = 0.0
+                                thrust_used = max(drag, 0.0)
+                            cruise_trim_segment_index = segment_index
+                            cruise_trim_v = v_next
+                            cruise_trim_result = trim_result
+                            cruise_trim_gamma = gamma_next
+                            cruise_trim_thrust = thrust_used
+                        else:
+                            v_next = cruise_trim_v
+                            trim_result = cruise_trim_result
+                            gamma_next = cruise_trim_gamma
+                            thrust_used = cruise_trim_thrust
+                        last_aero = trim_result
+                        h_next = state.h + v_next * math.sin(gamma_next) * step_dt if seg.target_alt is None else seg.target_alt
+                        x_next = state.x + v_next * math.cos(gamma_next) * step_dt
+                        segment_time += step_dt
+                        segment_distance += v_next * math.cos(gamma_next) * step_dt
+                        time_limit = seg.time
+                        if seg.kind == "loiter" and seg.mode == "max_endurance_eq" and seg.time is None and seg.distance is None:
+                            if segment_index not in segment_time_limit:
+                                energy_reserve_j = cfg["propulsion"]["battery_energy_j"] * energy_reserve
+                                available_energy = max(state.energy_j - energy_reserve_j, 0.0)
+                                power_required = max(trim_result["Drag"], 0.0) * v_next / cfg["propulsion"]["prop_eff"]
+                                power_used = max(min(power_required, power_limit), 1e-6)
+                                segment_time_limit[segment_index] = available_energy / power_used
+                            time_limit = segment_time_limit[segment_index]
+                        if seg.distance is not None:
+                            phase = "segment_done" if segment_distance >= seg.distance else seg.kind
+                        else:
+                            phase = "segment_done" if time_limit is not None and segment_time >= time_limit else seg.kind
+                        if seg.kind == "loiter":
+                            update_loiter_metrics(segment_index, step_dt, trim_result, v_next, rho)
+                    elif seg.kind == "landing":
+                        cl_max = cfg["wing"]["cl_max_landing"]
+                        v_stall = math.sqrt(2.0 * weight_eff / (rho * cfg["wing"]["area"] * cl_max))
+                        v_min = profile.landing_stall_margin * v_stall
+                        if v_next < v_min:
+                            v_next = v_min
+                        if seg.elevator_deg is not None:
+                            trim_result = solve_trim_fixed_elevator(
+                                v_next,
+                                rho,
+                                mu,
+                                weight_eff,
+                                seg.elevator_deg,
+                                profile.trim_max_iter_opt,
+                            )
+                        else:
+                            trim_result = solve_trim(v_next, rho, mu, weight_eff, profile.trim_max_iter_opt)
+                        last_aero = trim_result
+                        thrust_used = 0.0
+                        drag = trim_result["Drag"]
+                        gamma_next = math.asin(max(min((thrust_used - drag) / state.weight, 0.0), -0.3))
+                        h_next = max(state.h + v_next * math.sin(gamma_next) * step_dt, 0.0)
+                        x_next = state.x + v_next * math.cos(gamma_next) * step_dt
+                        phase = "landed" if h_next <= 0.0 else seg.kind
                     else:
-                        phase = "segment_done" if time_limit is not None and segment_time >= time_limit else seg.kind
-                elif seg.kind == "landing":
-                    cl_max = cfg["wing"]["cl_max_landing"]
-                    v_stall = math.sqrt(2.0 * weight_eff / (rho * cfg["wing"]["area"] * cl_max))
-                    v_min = profile.landing_stall_margin * v_stall
-                    if v_next < v_min:
-                        v_next = v_min
-                    thrust = 0.0
-                    drag = trim_result["Drag"]
-                    gamma_next = math.asin(max(min((thrust - drag) / state.weight, 0.0), -0.3))
-                    h_next = max(state.h + v_next * math.sin(gamma_next) * step_dt, 0.0)
-                    x_next = state.x + v_next * math.cos(gamma_next) * step_dt
-                    phase = "landed" if h_next <= 0.0 else seg.kind
+                        break
+    
                 else:
                     break
-    
+
                 if phase == "segment_done":
                     segment_index += 1
                     segment_time = 0.0
@@ -734,8 +1043,13 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
             else:
                 state_phase = phase
     
-            thrust = available_thrust(max(v_next, 0.1), rho)
-            power_used = min(power_limit, thrust * max(v_next, 0.1) / cfg["propulsion"]["prop_eff"])
+            thrust_cap = available_thrust(max(v_next, 0.1), rho)
+            thrust_used = min(max(thrust_used, 0.0), thrust_cap)
+            if thrust_cap > 0.0:
+                throttle = thrust_used / thrust_cap
+            else:
+                throttle = 0.0
+            power_used = power_limit * min(max(throttle, 0.0), 1.0)
             energy_next = max(state.energy_j - power_used * step_dt, 0.0)
         
             state = MissionState(
@@ -750,56 +1064,83 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
             )
             history.append(state)
             last_gamma = gamma_next
+            last_thrust_used = thrust_used
         
             if profile.log_interval > 0.0 and state.t >= next_log_time:
                 lift = last_aero["Lift"] if last_aero else 0.0
                 drag = last_aero["Drag"] if last_aero else 0.0
+                aoa = last_aero.get("AOA", 0.0) if last_aero else 0.0
                 elev = last_aero.get("ElevatorDeg", 0.0) if last_aero else 0.0
-                thrust = available_thrust(max(state.v, 0.1), rho)
-                print(f"[{state.t:7.1f}s] phase={state.phase:<10} h={state.h:7.1f} m  v={state.v:6.2f} m/s  x={state.x:8.1f} m  L={lift:8.1f} N  D={drag:7.1f} N  T={thrust:7.1f} N  elev={elev:6.2f} deg  E={state.energy_j:9.0f} J")
+                thrust = last_thrust_used
+                if last_aero:
+                    if last_aero.get("Converged", False):
+                        trim_status = "ok"
+                    elif last_aero.get("AoaClamped", False) or last_aero.get("ElevatorClamped", False):
+                        trim_status = "lim"
+                    else:
+                        trim_status = "nc"
+                else:
+                    trim_status = "na"
+                print(f"[{state.t:7.1f}s] phase={state.phase:<10} h={state.h:7.1f} m  v={state.v:6.2f} m/s  x={state.x:8.1f} m  L={lift:8.1f} N  D={drag:7.1f} N  T={thrust:7.1f} N  aoa={aoa:6.2f} deg  elev={elev:6.2f} deg  trim={trim_status:>3}  E={state.energy_j:9.0f} J")
                 next_log_time = state.t + profile.log_interval
     
             if prev_phase == "takeoff" and state.phase != "takeoff":
-                segment_summaries.append({
+                summary = {
                     "segment": segment_label,
+                    "kind": segment_kind,
                     "time_s": state.t - segment_start_t,
                     "distance_m": state.x - segment_start_x,
                     "energy_used_j": segment_start_energy - state.energy_j,
-                })
+                }
+                if segment_kind == "loiter" and current_segment_index is not None:
+                    summary.update(loiter_summary(current_segment_index))
+                segment_summaries.append(summary)
                 segment_start_energy = state.energy_j
                 segment_start_x = state.x
                 segment_start_t = state.t
                 if segments and segment_index < len(segments):
                     current_segment_index = segment_index
                     segment_label = f"{segments[current_segment_index].kind}:{current_segment_index}"
+                    segment_kind = segments[current_segment_index].kind
                 else:
                     current_segment_index = None
                     segment_label = "mission_end"
+                    segment_kind = "mission_end"
             elif current_segment_index is not None and segment_index != prev_segment_index:
-                segment_summaries.append({
+                summary = {
                     "segment": segment_label,
+                    "kind": segment_kind,
                     "time_s": state.t - segment_start_t,
                     "distance_m": state.x - segment_start_x,
                     "energy_used_j": segment_start_energy - state.energy_j,
-                })
+                }
+                if segment_kind == "loiter":
+                    summary.update(loiter_summary(current_segment_index))
+                segment_summaries.append(summary)
                 segment_start_energy = state.energy_j
                 segment_start_x = state.x
                 segment_start_t = state.t
                 if segment_index < len(segments):
                     current_segment_index = segment_index
                     segment_label = f"{segments[current_segment_index].kind}:{current_segment_index}"
+                    segment_kind = segments[current_segment_index].kind
                 else:
                     current_segment_index = None
                     segment_label = "mission_end"
+                    segment_kind = "mission_end"
     
             if state.phase == "landed":
                 if segment_start_energy is not None and segment_label != "mission_end":
-                    segment_summaries.append({
+                    summary = {
                         "segment": segment_label,
+                        "kind": segment_kind,
                         "time_s": state.t - segment_start_t,
                         "distance_m": state.x - segment_start_x,
                         "energy_used_j": segment_start_energy - state.energy_j,
-                    })
+                    }
+                    if segment_kind == "loiter" and current_segment_index is not None:
+                        summary.update(loiter_summary(current_segment_index))
+                    segment_summaries.append(summary)
                 break
     
         if return_summary:
@@ -807,7 +1148,3 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
         return history
     finally:
         cfg["n_span"] = orig_n_span
-        if orig_foil_cache is None:
-            cfg.pop("foil_cache", None)
-        else:
-            cfg["foil_cache"] = orig_foil_cache

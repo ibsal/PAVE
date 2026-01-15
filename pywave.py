@@ -5,16 +5,17 @@ from mission_model import AircraftModel, MissionProfile, MissionSegment, simulat
 
 ### Environment Configuration
 GroundLevel = 0 # M, ASL
-OrbitLevel = 1200 #M, AGL
-flightVelocity = 21 #SUPER PLACEHOLDER m/s
+OrbitLevel = 300 #M, AGL
+flightVelocity = 30 #SUPER PLACEHOLDER m/s
 flightAOA = 2 # SUPER PLACEHOLDER degrees
 TailEfficiency = 0.95 # q_tail / q_wing (0.9-1.0 typical). Scales tail Cl and Cd
 ElevatorDeflection = 0 # deg, standard convention: positive = TE down
-ElevatorEffectivenessTau = 0.35 # deg tail alpha per deg elevator (0.3-0.6 typical)
+ElevatorEffectivenessTau = 0.45 # deg tail alpha per deg elevator (0.3-0.6 typical)
+ElevatorLimitDeg = 30.0
 Weight = 200 #N = 45 lbf
 SurfaceRoughness = 0.00635e-3 # m, equivalent sand grain roughness (0 for smooth)
 FuselageLaminarFrac = 0.3
-BoomLaminarFrac = 0.3
+BoomLaminarFrac = 0.04
 MaxPowerW = 4000.0
 PropEff = 0.59
 BatteryEnergyJ = 7920000
@@ -23,8 +24,8 @@ MaxThrustN = 152.0
 
 ### Aircraft CG Definitions x = 0 at the nose 
 Xwqc = 0.45 # M
-Xhtqc = 4 # M
-Xcg = 0.4 # M
+Xhtqc = 2 # M
+Xcg = 0.2 # M
 
 ### Wing Definition
 RootChord = 0.3
@@ -33,7 +34,7 @@ MidChordPos = 0.4 # fraction of half span from root to tip (0-1)
 TipChord = 0.2
 RootThickness = 0.1
 TipThickness = 0.1
-Span = 3.9624 #M, wing span (both sides)
+Span = 5 #M, wing span (both sides)
 RootSweepDeg = 0.0
 MidSweepDeg = 0
 MidSweepPos = 0.4 # fraction of half span from root to tip (0-1)
@@ -45,13 +46,13 @@ WingClMaxCruise = 1.2
 WingClMaxLanding = 1.6
 
 ### Horizontal and Vertical Tail Definition
-HRootChord = 0.1 #M
-HMidChord = 0.1
-HMidChordPos = 0.4 # fraction of half span from root to tip (0-1)
+HRootChord = 0.386 #M
+HMidChord = 0.2286
+HMidChordPos = 0.8 # fraction of half span from root to tip (0-1)
 HTipChord = 0.1 #M
 HRootThickness = 0.1
 HTipThickness = 0.1
-HSpan = 1 #M, total span (both sides)
+HSpan = 2 #M, total span (both sides)
 HRootSweepDeg = 0.0
 HMidSweepDeg = 0.0
 HMidSweepPos = 0.4 # fraction of half span from root to tip (0-1)
@@ -71,13 +72,22 @@ VTipSweepDeg = 0.0
 Hfoil = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
 Vfoil = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
 VtailCount = 2
-HtailIncidence = -2 # deg, standard convention: incidence > 0 -> tail angled with TE down
+HtailIncidence = 3 # deg, standard convention: incidence > 0 -> tail angled with TE down
 VtailIncidence = 0 # deg
 
+WingTaper = TipChord / RootChord
+WingMAC = 2.0 / 3.0 * RootChord * (1 + WingTaper + WingTaper**2) / (1 + WingTaper)
+WingArea = 0.5 * (RootChord + TipChord) * Span
+HtailArea = 0.5 * (HRootChord + HTipChord) * HSpan
+VtailArea = 0.5 * (VRootChord + VTipChord) * VSpan * VtailCount
+TailArm = Xhtqc - Xwqc
+HtailVolumeCoeff = (HtailArea * TailArm) / (WingArea * WingMAC)
+VtailVolumeCoeff = (VtailArea * TailArm) / (WingArea * Span)
+
 ### Boom Definition 
-BoomLength = 1.8
+BoomLength = Xhtqc - Xwqc
 BoomDiameter = 0.03
-BoomCount = 1.8
+BoomCount = 2
 
 ### Fuselage Definition 
 FuselageWidth = 0.3 # M
@@ -95,7 +105,7 @@ config = build_aircraft_config(
     tail_efficiency=TailEfficiency,
     elevator_tau=ElevatorEffectivenessTau,
     downwash_factor=0.45,
-    cd_misc=0.001,
+    cd_misc=0.005,
     x_wqc=Xwqc,
     x_htqc=Xhtqc,
     x_cg=Xcg,
@@ -153,29 +163,52 @@ config = build_aircraft_config(
     max_thrust_n=MaxThrustN,
 )
 
-trim_aoa, trim_elev, converged, _ = solve_trim(config, flightAOA, ElevatorDeflection)
+trim_aoa, trim_elev, converged, _ = solve_trim(config, flightAOA, ElevatorDeflection, elevator_limit_deg=ElevatorLimitDeg)
 if not converged:
     print("Warning: trim solver did not converge; reporting last iteration.")
 trim_result = run_analysis(config, trim_aoa, trim_elev, build_report=True)
 print("\n".join(trim_result["report_lines"]))
+polar_rows = trim_result.get("polar_rows")
+if polar_rows:
+    try:
+        import matplotlib.pyplot as plt
+
+        cds = [row[2] for row in polar_rows]
+        cls = [row[1] for row in polar_rows]
+        fig, ax = plt.subplots()
+        ax.plot(cds, cls, marker="o")
+        ax.set_xlabel("Cd")
+        ax.set_ylabel("Cl")
+        ax.set_title("Cruise Polar (Cl vs Cd)")
+        ax.grid(True, linestyle="--", linewidth=0.5)
+        plot_path = "cruise_polar.png"
+        fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Cruise polar plot saved to {plot_path}")
+    except Exception as exc:
+        csv_path = "cruise_polar.csv"
+        with open(csv_path, "w", newline="") as handle:
+            handle.write("aoa_deg,cl_total,cd_total,ld\n")
+            for row in polar_rows:
+                handle.write(f"{row[0]:.3f},{row[1]:.6f},{row[2]:.6f},{row[3]:.3f}\n")
+        print(f"Cruise polar data saved to {csv_path} (plot unavailable: {exc})")
 
 model = AircraftModel(config)
 profile = MissionProfile(
     segments=[
-        MissionSegment(kind="climb_to", target_alt=289.56, speed=30, elevator_deg=6.0),
-        MissionSegment(kind="cruise", distance=500.0, mode="max_endurance_eq", speed_max=40.0),
-        MissionSegment(kind="loiter", bank_deg=10.0, mode="max_endurance_eq", speed_max=40.0),
-        MissionSegment(kind="cruise", distance=500.0, mode="max_endurance_eq", speed_max=40.0),
-        MissionSegment(kind="descent_to", target_alt=200.0, speed=14.0, elevator_deg=-10.0, thrust_scale=0.0),
+        MissionSegment(kind="climb_to", target_alt=20, mode = "min_time"),
+        MissionSegment(kind="cruise", distance=500.0, mode="max_endurance_eq", speed_max=80.0),
+        MissionSegment(kind="loiter", bank_deg=10.0, mode="max_endurance_eq", speed_max=80.0),
+        MissionSegment(kind="cruise", distance=500.0, mode="max_endurance_eq", speed_max=80.0),
+        MissionSegment(kind="descent_to", target_alt=10, speed=14.0, elevator_deg=-10.0, thrust_scale=0.0),
         MissionSegment(kind="loiter", speed=14.0, time=180.0, bank_deg=20.0),
         MissionSegment(kind="landing", speed=12.0),
     ],
     log_interval = 0.1,
     takeoff_aero_stride=5,
-    speed_opt_mode="cheap",
     n_span=300,
-    foil_cache={},
-    power_margin_frac=0.2,
+    power_derate_frac=0.0,
+    energy_reserve_frac=0.2,
 )
 mission_history, segment_summaries = simulate_mission(model, profile, initial_alt=0.0, return_summary=True)
 last_state = mission_history[-1]
@@ -196,3 +229,16 @@ if segment_summaries:
     print("-" * len(header))
     for row in segment_summaries:
         print(f"{row['segment']:<18} {row['time_s']:>10.1f} {row['distance_m']:>10.1f} {row['energy_used_j']:>14.0f}")
+    loiter_rows = [row for row in segment_summaries if row.get("kind") == "loiter" and "cl_avg" in row]
+    if loiter_rows:
+        print("")
+        print("Loiter Aerodynamics (Time-Weighted)")
+        header = f"{'Segment':<18} {'AOA':>7} {'Elev':>7} {'CL':>8} {'CD':>8} {'CDo':>8} {'L/D':>8} {'L':>9} {'D':>9}"
+        print(header)
+        print("-" * len(header))
+        for row in loiter_rows:
+            print(
+                f"{row['segment']:<18} {row['aoa_deg']:>7.2f} {row['elev_deg']:>7.2f} {row['cl_avg']:>8.4f} "
+                f"{row['cd_avg']:>8.5f} {row['cdo_avg']:>8.5f} {row['ld_avg']:>8.2f} {row['lift_avg_n']:>9.1f} "
+                f"{row['drag_avg_n']:>9.1f}"
+            )
