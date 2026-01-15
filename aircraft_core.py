@@ -220,7 +220,7 @@ def non_lifting_drag_stack(config, rho, mu, v):
         non_lifting_cdo.append(cdo)
         stack_lines.append(f"{name:<12} {ff:>10.4f} {q:>6.3f} {cfc:>10.5f} {sw:>12.5f} {cdo:>12.6f}")
     stack_lines.append(f"{'Total':<12} {'':>10} {'':>6} {'':>10} {'':>12} {cd_non_lifting:>12.6f}")
-    return cd_non_lifting, non_lifting_cdo, components, stack_lines, cfc_list, re_list
+    return cd_non_lifting, non_lifting_cdo, components, stack_lines, cfc_list, re_list, ff_list, q_list, sratio_list
 
 
 def run_analysis(config, flight_aoa, elevator_deflection, build_report=True):
@@ -236,7 +236,7 @@ def run_analysis(config, flight_aoa, elevator_deflection, build_report=True):
 
     alpha = flight_aoa + wing["incidence"]
 
-    cd_non_lifting, non_lifting_cdo, components, stack_lines, cfc_list, re_list = non_lifting_drag_stack(config, rho, mu, v)
+    cd_non_lifting, non_lifting_cdo, components, stack_lines, cfc_list, re_list, ff_list, q_list, sratio_list = non_lifting_drag_stack(config, rho, mu, v)
 
     cd_profile, cl, re = integrate_profile_drag(
         wing["foil"],
@@ -382,6 +382,21 @@ def run_analysis(config, flight_aoa, elevator_deflection, build_report=True):
     v_stall_takeoff = stall_speed(wing.get("cl_max_takeoff"))
     v_stall_cruise = stall_speed(wing.get("cl_max_cruise"))
     v_stall_landing = stall_speed(wing.get("cl_max_landing"))
+    stall_speeds = config.get("stall_speeds", {}) or {}
+    v_cruise = stall_speeds.get("cruise", v)
+    v_takeoff = stall_speeds.get("takeoff")
+    v_landing = stall_speeds.get("landing")
+    if v_takeoff is None:
+        v_takeoff = v_cruise
+    if v_landing is None:
+        v_landing = v_cruise
+    stall_margins = config.get("stall_margins", {}) or {}
+    required_margin_cruise = stall_margins.get("cruise", stall_margins.get("level_flight", stall_margins.get("level_flight_stall_margin")))
+    required_margin_takeoff = stall_margins.get("takeoff")
+    required_margin_landing = stall_margins.get("landing")
+    achieved_margin_cruise = (v_cruise / v_stall_cruise) if v_stall_cruise > 0.0 else 0.0
+    achieved_margin_takeoff = (v_takeoff / v_stall_takeoff) if v_stall_takeoff > 0.0 else 0.0
+    achieved_margin_landing = (v_landing / v_stall_landing) if v_stall_landing > 0.0 else 0.0
 
     prop = config.get("propulsion", {})
     max_power = prop.get("max_power_w", 0.0)
@@ -491,10 +506,33 @@ def run_analysis(config, flight_aoa, elevator_deflection, build_report=True):
             ps_min_aoa = aoa
         polar_rows.append((aoa, cl_total_i, cd_total_i, ld_i))
 
+    drag_stack = []
+    for name, ff, q, cfc, sratio, cdo in zip(components, ff_list, q_list, cfc_list, sratio_list, non_lifting_cdo):
+        drag_stack.append({
+            "component": name,
+            "ff": ff,
+            "q": q,
+            "cfc": cfc,
+            "sratio": sratio,
+            "cdo": cdo,
+        })
+
     result = {
         "Lift": lift,
         "Drag": drag,
         "TotalPitchMoment": total_moment,
+        "ClWing": cl,
+        "ClTail": cl_htail,
+        "ClTotal": cl + cl_htail,
+        "Cd0": cd0,
+        "CdInduced": cd_induced,
+        "CdTotal": cd_total,
+        "CmTotal": cm_total,
+        "CmWingCG": cm_wing_cg,
+        "CmWingRoot": cm_wing_root,
+        "AOA": flight_aoa,
+        "HTailAOA": htail_aoa,
+        "drag_stack": drag_stack,
         "report_lines": None,
         "polar_rows": polar_rows,
     }
@@ -571,9 +609,21 @@ def run_analysis(config, flight_aoa, elevator_deflection, build_report=True):
     report_lines.append(perf_header)
     report_lines.append("-" * len(perf_header))
     report_lines.append(f"{'Wing Loading':<18} {wing_loading:>12.2f} {'N/m^2':>9}")
-    report_lines.append(f"{'Stall TO':<18} {v_stall_takeoff:>12.2f} {'m/s':>9}")
-    report_lines.append(f"{'Stall Cruise':<18} {v_stall_cruise:>12.2f} {'m/s':>9}")
-    report_lines.append(f"{'Stall Land':<18} {v_stall_landing:>12.2f} {'m/s':>9}")
+    to_inline = f"{'Stall TO':<18} {v_stall_takeoff:>7.2f} m/s | V={v_takeoff:>7.2f}"
+    if required_margin_takeoff is not None:
+        to_inline += f" | Req={required_margin_takeoff:>5.3f}"
+    to_inline += f" | Ach={achieved_margin_takeoff:>5.3f}"
+    report_lines.append(to_inline)
+    cruise_inline = f"{'Stall Cruise':<18} {v_stall_cruise:>7.2f} m/s | V={v_cruise:>7.2f}"
+    if required_margin_cruise is not None:
+        cruise_inline += f" | Req={required_margin_cruise:>5.3f}"
+    cruise_inline += f" | Ach={achieved_margin_cruise:>5.3f}"
+    report_lines.append(cruise_inline)
+    land_inline = f"{'Stall Land':<18} {v_stall_landing:>7.2f} m/s | V={v_landing:>7.2f}"
+    if required_margin_landing is not None:
+        land_inline += f" | Req={required_margin_landing:>5.3f}"
+    land_inline += f" | Ach={achieved_margin_landing:>5.3f}"
+    report_lines.append(land_inline)
     report_lines.append(f"{'L/D Max':<18} {ld_max:>12.2f} {'':>9}")
     report_lines.append(f"{'CL @ L/D Max':<18} {ld_max_cl:>12.4f} {'':>9}")
     report_lines.append(f"{'CD @ L/D Max':<18} {ld_max_cd:>12.5f} {'':>9}")

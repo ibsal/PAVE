@@ -531,11 +531,26 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
             gamma = math.asin(max(min((thrust - drag) / weight, 0.3), -0.3))
         return gamma, trim_result
 
-    def optimize_speed(v_min, v_max, mode, weight_eff, thrust_scale, elevator_deg=None):
+    def optimize_speed(v_min, v_max, mode, weight_eff, thrust_scale, elevator_deg=None, return_trim=False):
         if v_min is None or v_max is None or v_max <= v_min:
-            return v_min if v_min is not None else max(state.v, 0.1)
+            best_v = v_min if v_min is not None else max(state.v, 0.1)
+            if not return_trim:
+                return best_v
+            if elevator_deg is None:
+                trim_result = solve_trim(best_v, rho, mu, weight_eff, profile.trim_max_iter_opt)
+            else:
+                trim_result = solve_trim_fixed_elevator(
+                    best_v,
+                    rho,
+                    mu,
+                    weight_eff,
+                    elevator_deg,
+                    profile.trim_max_iter_opt,
+                )
+            return best_v, trim_result
         best_v = v_min
         best_metric = None
+        best_trim = None
         points = max(profile.speed_opt_points, 3)
         if profile.speed_opt_mode == "cheap":
             samples = [v_min, 0.5 * (v_min + v_max), v_max]
@@ -569,6 +584,9 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
             if best_metric is None or metric > best_metric:
                 best_metric = metric
                 best_v = v
+                best_trim = trim_result
+        if return_trim:
+            return best_v, best_trim
         return best_v
 
     def estimate_cd0_total(rho, mu, v):
@@ -797,9 +815,7 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                         v_stall = math.sqrt(2.0 * stall_weight / (rho * cfg["wing"]["area"] * cl_max))
                         v_min = profile.takeoff_climb_margin * v_stall
                         v_max = seg.speed_max if seg.speed_max is not None else max(v_min * 2.0, v_min + 1.0)
-                        elevator_lock = None
-                        if seg.mode is not None and seg.speed is None and seg.elevator_deg is None:
-                            elevator_lock = segment_elevator_lock.get(segment_index)
+                        elevator_lock = seg.elevator_deg if seg.elevator_deg is not None else segment_elevator_lock.get(segment_index)
                         if seg.mode is not None and seg.speed is None:
                             v_next = optimize_speed(v_min, v_max, seg.mode, weight_eff, 1.0, elevator_deg=elevator_lock)
                         elif v_next < v_min:
@@ -833,21 +849,32 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                             gamma_next, trim_result = trim_with_gamma(v_next, rho, mu, state.weight, bank_rad, 1.0)
                             last_aero = trim_result
                             thrust_used = thrust_available
-                            if seg.mode is not None and seg.speed is None:
-                                locked_elev = trim_result.get("ElevatorDeg") if trim_result else None
-                                if locked_elev is not None:
-                                    segment_elevator_lock[segment_index] = locked_elev
+                            locked_elev = trim_result.get("ElevatorDeg") if trim_result else None
+                            if locked_elev is not None:
+                                segment_elevator_lock[segment_index] = locked_elev
+                        if seg.target_alt is not None and gamma_next <= 1e-6:
+                            raise ValueError(
+                                f"Climb segment {segment_index} cannot climb: gamma={math.degrees(gamma_next):.2f} deg"
+                            )
+                        if seg.dt is None and seg.target_alt is not None:
+                            vertical_speed = v_next * math.sin(gamma_next)
+                            if vertical_speed > 1e-6:
+                                remaining_alt = seg.target_alt - state.h
+                                if remaining_alt > 0.0:
+                                    step_dt = remaining_alt / vertical_speed
                         h_next = state.h + v_next * math.sin(gamma_next) * step_dt
                         x_next = state.x + v_next * math.cos(gamma_next) * step_dt
-                        phase = seg.kind if h_next < seg.target_alt else "segment_done"
+                        if seg.dt is None and seg.target_alt is not None and h_next >= seg.target_alt:
+                            h_next = seg.target_alt
+                            phase = "segment_done"
+                        else:
+                            phase = seg.kind if h_next < seg.target_alt else "segment_done"
                     elif seg.kind == "descent_to":
                         cl_max = cfg["wing"]["cl_max_cruise"]
                         v_stall = math.sqrt(2.0 * stall_weight / (rho * cfg["wing"]["area"] * cl_max))
                         v_min = profile.level_flight_stall_margin * v_stall
                         v_max = seg.speed_max if seg.speed_max is not None else max(v_min * 2.0, v_min + 1.0)
-                        elevator_lock = None
-                        if seg.mode is not None and seg.speed is None and seg.elevator_deg is None:
-                            elevator_lock = segment_elevator_lock.get(segment_index)
+                        elevator_lock = seg.elevator_deg if seg.elevator_deg is not None else segment_elevator_lock.get(segment_index)
                         if seg.mode is not None and seg.speed is None:
                             v_next = optimize_speed(v_min, v_max, seg.mode, weight_eff, 0.2, elevator_deg=elevator_lock)
                         elif v_next < v_min:
@@ -882,10 +909,19 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                             gamma_next, trim_result = trim_with_gamma(v_next, rho, mu, state.weight, bank_rad, thrust_scale)
                             last_aero = trim_result
                             thrust_used = thrust_available * thrust_scale
-                            if seg.mode is not None and seg.speed is None:
-                                locked_elev = trim_result.get("ElevatorDeg") if trim_result else None
-                                if locked_elev is not None:
-                                    segment_elevator_lock[segment_index] = locked_elev
+                            locked_elev = trim_result.get("ElevatorDeg") if trim_result else None
+                            if locked_elev is not None:
+                                segment_elevator_lock[segment_index] = locked_elev
+                        if seg.target_alt is not None and gamma_next >= -1e-6:
+                            raise ValueError(
+                                f"Descent segment {segment_index} cannot descend: gamma={math.degrees(gamma_next):.2f} deg"
+                            )
+                        if seg.dt is None and seg.target_alt is not None:
+                            vertical_speed = v_next * math.sin(gamma_next)
+                            if vertical_speed < -1e-6:
+                                remaining_alt = state.h - seg.target_alt
+                                if remaining_alt > 0.0:
+                                    step_dt = remaining_alt / (-vertical_speed)
                         h_next = max(state.h + v_next * math.sin(gamma_next) * step_dt, seg.target_alt)
                         x_next = state.x + v_next * math.cos(gamma_next) * step_dt
                         phase = "segment_done" if h_next <= seg.target_alt else seg.kind
@@ -895,26 +931,37 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                             v_stall = math.sqrt(2.0 * weight_eff / (rho * cfg["wing"]["area"] * cl_max))
                             v_min = profile.level_flight_stall_margin * v_stall
                             v_max = seg.speed_max if seg.speed_max is not None else max(v_min * 2.0, v_min + 1.0)
+                            trim_result = None
                             if seg.mode is not None and seg.speed is None:
                                 if seg.mode == "max_endurance_eq":
                                     v_next = endurance_speed_from_eq(state.weight, rho, v_min, load_factor)
+                                elif seg.mode == "max_endurance":
+                                    v_next, trim_result = optimize_speed(
+                                        v_min,
+                                        v_max,
+                                        seg.mode,
+                                        weight_eff,
+                                        1.0,
+                                        return_trim=True,
+                                    )
                                 else:
                                     v_next = optimize_speed(v_min, v_max, seg.mode, weight_eff, 1.0)
                             if v_next < v_min:
                                 v_next = v_min
                             if v_next > v_max:
                                 v_next = v_max
-                            if seg.elevator_deg is not None:
-                                trim_result = solve_trim_fixed_elevator(
-                                    v_next,
-                                    rho,
-                                    mu,
-                                    weight_eff,
-                                    seg.elevator_deg,
-                                    profile.trim_max_iter_opt,
-                                )
-                            else:
-                                trim_result = solve_trim(v_next, rho, mu, weight_eff, profile.trim_max_iter_opt)
+                            if trim_result is None:
+                                if seg.elevator_deg is not None:
+                                    trim_result = solve_trim_fixed_elevator(
+                                        v_next,
+                                        rho,
+                                        mu,
+                                        weight_eff,
+                                        seg.elevator_deg,
+                                        profile.trim_max_iter_opt,
+                                    )
+                                else:
+                                    trim_result = solve_trim(v_next, rho, mu, weight_eff, profile.trim_max_iter_opt)
                             if seg.speed is None:
                                 lift_tol = 1e-3 * max(weight_eff, 1.0)
                                 for _ in range(10):
@@ -971,6 +1018,10 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                             else:
                                 gamma_next = 0.0
                                 thrust_used = max(drag, 0.0)
+                            if seg.target_alt is None and abs(gamma_next) > 1e-3:
+                                raise ValueError(
+                                    f"Cruise/loiter segment {segment_index} cannot hold altitude: gamma={math.degrees(gamma_next):.2f} deg"
+                                )
                             cruise_trim_segment_index = segment_index
                             cruise_trim_v = v_next
                             cruise_trim_result = trim_result
@@ -982,12 +1033,8 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                             gamma_next = cruise_trim_gamma
                             thrust_used = cruise_trim_thrust
                         last_aero = trim_result
-                        h_next = state.h + v_next * math.sin(gamma_next) * step_dt if seg.target_alt is None else seg.target_alt
-                        x_next = state.x + v_next * math.cos(gamma_next) * step_dt
-                        segment_time += step_dt
-                        segment_distance += v_next * math.cos(gamma_next) * step_dt
                         time_limit = seg.time
-                        if seg.kind == "loiter" and seg.mode == "max_endurance_eq" and seg.time is None and seg.distance is None:
+                        if seg.kind == "loiter" and seg.mode in ("max_endurance_eq", "max_endurance") and seg.time is None and seg.distance is None:
                             if segment_index not in segment_time_limit:
                                 energy_reserve_j = cfg["propulsion"]["battery_energy_j"] * energy_reserve
                                 available_energy = max(state.energy_j - energy_reserve_j, 0.0)
@@ -995,6 +1042,23 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                                 power_used = max(min(power_required, power_limit), 1e-6)
                                 segment_time_limit[segment_index] = available_energy / power_used
                             time_limit = segment_time_limit[segment_index]
+                        if seg.dt is None:
+                            fast_dt = None
+                            ground_speed = v_next * math.cos(gamma_next)
+                            if seg.distance is not None and ground_speed > 1e-6:
+                                remaining = seg.distance - segment_distance
+                                if remaining > 0.0:
+                                    fast_dt = remaining / ground_speed
+                            elif time_limit is not None:
+                                remaining = time_limit - segment_time
+                                if remaining > 0.0:
+                                    fast_dt = remaining
+                            if fast_dt is not None:
+                                step_dt = fast_dt
+                        h_next = state.h + v_next * math.sin(gamma_next) * step_dt if seg.target_alt is None else seg.target_alt
+                        x_next = state.x + v_next * math.cos(gamma_next) * step_dt
+                        segment_time += step_dt
+                        segment_distance += v_next * math.cos(gamma_next) * step_dt
                         if seg.distance is not None:
                             phase = "segment_done" if segment_distance >= seg.distance else seg.kind
                         else:
@@ -1007,21 +1071,29 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                         v_min = profile.landing_stall_margin * v_stall
                         if v_next < v_min:
                             v_next = v_min
-                        if seg.elevator_deg is not None:
+                        elevator_lock = seg.elevator_deg if seg.elevator_deg is not None else segment_elevator_lock.get(segment_index)
+                        if elevator_lock is not None:
                             trim_result = solve_trim_fixed_elevator(
                                 v_next,
                                 rho,
                                 mu,
                                 weight_eff,
-                                seg.elevator_deg,
+                                elevator_lock,
                                 profile.trim_max_iter_opt,
                             )
                         else:
                             trim_result = solve_trim(v_next, rho, mu, weight_eff, profile.trim_max_iter_opt)
+                            locked_elev = trim_result.get("ElevatorDeg") if trim_result else None
+                            if locked_elev is not None:
+                                segment_elevator_lock[segment_index] = locked_elev
                         last_aero = trim_result
                         thrust_used = 0.0
                         drag = trim_result["Drag"]
                         gamma_next = math.asin(max(min((thrust_used - drag) / state.weight, 0.0), -0.3))
+                        if seg.dt is None:
+                            vertical_speed = v_next * math.sin(gamma_next)
+                            if vertical_speed < -1e-6 and state.h > 0.0:
+                                step_dt = state.h / (-vertical_speed)
                         h_next = max(state.h + v_next * math.sin(gamma_next) * step_dt, 0.0)
                         x_next = state.x + v_next * math.cos(gamma_next) * step_dt
                         phase = "landed" if h_next <= 0.0 else seg.kind
