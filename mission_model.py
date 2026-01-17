@@ -32,9 +32,9 @@ class MissionProfile:
     landing_stall_margin: float = 1.30
     max_time: float = 4000000.0
     trim_update_dt: float = 5.0
-    trim_max_iter: int = 8
+    trim_max_iter: int = 50
     trim_gamma_iters: int = 2
-    trim_max_iter_opt: int = 4
+    trim_max_iter_opt: int = 50
     segments: list | None = None
     log_interval: float = 2.0
     speed_opt_points: int = 10
@@ -1179,7 +1179,12 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                         trim_status = "nc"
                 else:
                     trim_status = "na"
-                print(f"[{state.t:7.1f}s] phase={state.phase:<10} h={state.h:7.1f} m  v={state.v:6.2f} m/s  x={state.x:8.1f} m  L={lift:8.1f} N  D={drag:7.1f} N  T={thrust:7.1f} N  aoa={aoa:6.2f} deg  elev={elev:6.2f} deg  trim={trim_status:>3}  E={state.energy_j:9.0f} J")
+                residual_str = ""
+                if last_aero and trim_status == "nc":
+                    res_lift = last_aero.get("LiftResidual", 0.0)
+                    res_moment = last_aero.get("MomentResidual", 0.0)
+                    residual_str = f"  resL={res_lift:8.2f} N  resM={res_moment:8.2f} N*m"
+                print(f"[{state.t:7.1f}s] phase={state.phase:<10} h={state.h:7.1f} m  v={state.v:6.2f} m/s  x={state.x:8.1f} m  L={lift:8.1f} N  D={drag:7.1f} N  T={thrust:7.1f} N  aoa={aoa:6.2f} deg  elev={elev:6.2f} deg  trim={trim_status:>3}  E={state.energy_j:9.0f} J{residual_str}")
                 next_log_time = state.t + profile.log_interval
     
             if prev_phase == "takeoff" and state.phase != "takeoff":
