@@ -1,12 +1,41 @@
 import math
+from functools import lru_cache
+
 import numpy as np
 from ambiance import Atmosphere
+
+
+@lru_cache(maxsize=128)
+def _atm_properties(altitude_m):
+    atm = Atmosphere(altitude_m)
+    return float(atm.density), float(atm.dynamic_viscosity)
+
+
+def _is_constant_chord(root_chord, tip_chord, chord_breaks, tol=1e-6):
+    if chord_breaks:
+        base = chord_breaks[0][1]
+        return all(abs(chord - base) <= tol for _, chord in chord_breaks)
+    return abs(root_chord - tip_chord) <= tol
+
+
+def _is_zero_sweep(sweep_breaks, tol=1e-6):
+    if not sweep_breaks:
+        return True
+    return all(abs(deg) <= tol for _, deg in sweep_breaks)
 
 
 def integrate_profile_drag(foil, root_chord, tip_chord, span, area_ref, alpha_deg, rho, mu, velocity, n=1000, count=1, symmetric=True, chord_breaks=None, sweep_breaks=None):
     half_span = 0.5 * span if symmetric else span
     dx = half_span / n
     span_stations = np.arange(dx / 2, half_span, dx)
+    if _is_constant_chord(root_chord, tip_chord, chord_breaks) and _is_zero_sweep(sweep_breaks):
+        reynolds = rho * velocity * root_chord / mu
+        cd2d = foil.cd(alpha_deg=alpha_deg, reynolds=reynolds)
+        cl2d = foil.cl(alpha_deg=alpha_deg, reynolds=reynolds)
+        factor = (2.0 if symmetric else 1.0) * count
+        cd_profile = cd2d * root_chord * half_span / area_ref * factor
+        cl_total = cl2d * root_chord * half_span / area_ref * factor
+        return cd_profile, cl_total, np.array([reynolds])
     if chord_breaks:
         fractions = span_stations / half_span
         break_fracs, break_chords = zip(*chord_breaks)
@@ -94,6 +123,15 @@ def integrate_pitching_moment_about_cg(foil, root_chord, tip_chord, span, alpha_
     half_span = 0.5 * span if symmetric else span
     dx = half_span / n
     span_stations = np.arange(dx / 2, half_span, dx)
+    if _is_constant_chord(root_chord, tip_chord, chord_breaks) and _is_zero_sweep(sweep_breaks):
+        reynolds = rho * velocity * root_chord / mu
+        cl2d = foil.cl(alpha_deg=alpha_deg, reynolds=reynolds)
+        cm2d = foil.cm(alpha_deg=alpha_deg, reynolds=reynolds)
+        factor = (2.0 if symmetric else 1.0) * count
+        lift = q_dyn * cl2d * root_chord * half_span * factor
+        lift_moment = -lift * (x_root_qc - x_cg)
+        cm_moment = q_dyn * cm2d * (root_chord ** 2) * half_span * factor
+        return lift_moment, cm_moment
     if chord_breaks:
         fractions = span_stations / half_span
         break_fracs, break_chords = zip(*chord_breaks)
@@ -128,6 +166,12 @@ def integrate_airfoil_cm(foil, root_chord, tip_chord, span, area_ref, mac_ref, a
     half_span = 0.5 * span if symmetric else span
     dx = half_span / n
     span_stations = np.arange(dx / 2, half_span, dx)
+    if _is_constant_chord(root_chord, tip_chord, chord_breaks) and _is_zero_sweep(sweep_breaks):
+        reynolds = rho * velocity * root_chord / mu
+        cm2d = foil.cm(alpha_deg=alpha_deg, reynolds=reynolds)
+        factor = (2.0 if symmetric else 1.0) * count
+        cm_sum = cm2d * (root_chord ** 2) * half_span * factor
+        return cm_sum / (area_ref * mac_ref)
     if chord_breaks:
         fractions = span_stations / half_span
         break_fracs, break_chords = zip(*chord_breaks)
@@ -223,16 +267,15 @@ def non_lifting_drag_stack(config, rho, mu, v):
     return cd_non_lifting, non_lifting_cdo, components, stack_lines, cfc_list, re_list, ff_list, q_list, sratio_list
 
 
-def run_analysis(config, flight_aoa, elevator_deflection, build_report=True):
+def run_analysis(config, flight_aoa, elevator_deflection, build_report=True, rho=None, mu=None):
     wing = config["wing"]
     htail = config["htail"]
     vtail = config["vtail"]
 
     n_span = config["n_span"]
     v = config["flight_velocity"]
-    atm = Atmosphere(config["analysis_altitude_m"])
-    rho = float(atm.density)
-    mu = float(atm.dynamic_viscosity)
+    if rho is None or mu is None:
+        rho, mu = _atm_properties(float(config["analysis_altitude_m"]))
 
     alpha = flight_aoa + wing["incidence"]
 
@@ -420,6 +463,40 @@ def run_analysis(config, flight_aoa, elevator_deflection, build_report=True):
             return float(min(foil.alpha_deg)), float(max(foil.alpha_deg))
         return None, None
 
+    drag_stack = []
+    for name, ff, q, cfc, sratio, cdo in zip(components, ff_list, q_list, cfc_list, sratio_list, non_lifting_cdo):
+        drag_stack.append({
+            "component": name,
+            "ff": ff,
+            "q": q,
+            "cfc": cfc,
+            "sratio": sratio,
+            "cdo": cdo,
+        })
+
+    result = {
+        "Lift": lift,
+        "Drag": drag,
+        "TotalPitchMoment": total_moment,
+        "ClWing": cl,
+        "ClTail": cl_htail,
+        "ClTotal": cl + cl_htail,
+        "Cd0": cd0,
+        "CdInduced": cd_induced,
+        "CdTotal": cd_total,
+        "CmTotal": cm_total,
+        "CmWingCG": cm_wing_cg,
+        "CmWingRoot": cm_wing_root,
+        "AOA": flight_aoa,
+        "HTailAOA": htail_aoa,
+        "drag_stack": drag_stack,
+        "report_lines": None,
+        "polar_rows": [],
+    }
+
+    if not build_report:
+        return result
+
     alpha_min, alpha_max = foil_alpha_limits(wing["foil"])
     if alpha_min is None or alpha_max is None:
         alpha_min = -5.0
@@ -506,39 +583,7 @@ def run_analysis(config, flight_aoa, elevator_deflection, build_report=True):
             ps_min_aoa = aoa
         polar_rows.append((aoa, cl_total_i, cd_total_i, ld_i))
 
-    drag_stack = []
-    for name, ff, q, cfc, sratio, cdo in zip(components, ff_list, q_list, cfc_list, sratio_list, non_lifting_cdo):
-        drag_stack.append({
-            "component": name,
-            "ff": ff,
-            "q": q,
-            "cfc": cfc,
-            "sratio": sratio,
-            "cdo": cdo,
-        })
-
-    result = {
-        "Lift": lift,
-        "Drag": drag,
-        "TotalPitchMoment": total_moment,
-        "ClWing": cl,
-        "ClTail": cl_htail,
-        "ClTotal": cl + cl_htail,
-        "Cd0": cd0,
-        "CdInduced": cd_induced,
-        "CdTotal": cd_total,
-        "CmTotal": cm_total,
-        "CmWingCG": cm_wing_cg,
-        "CmWingRoot": cm_wing_root,
-        "AOA": flight_aoa,
-        "HTailAOA": htail_aoa,
-        "drag_stack": drag_stack,
-        "report_lines": None,
-        "polar_rows": polar_rows,
-    }
-
-    if not build_report:
-        return result
+    result["polar_rows"] = polar_rows
 
     report_lines = []
     report_lines.append("\n=== REPORTS ===")
@@ -680,7 +725,19 @@ def run_analysis(config, flight_aoa, elevator_deflection, build_report=True):
     return result
 
 
-def solve_trim(config, flight_aoa_guess, elevator_guess, max_iter=20, tol_force=1e-3, tol_moment=1e-3, elevator_limit_deg=None, aoa_min_deg=None, aoa_max_deg=None):
+def solve_trim(
+    config,
+    flight_aoa_guess,
+    elevator_guess,
+    max_iter=20,
+    tol_force=1e-3,
+    tol_moment=1e-3,
+    elevator_limit_deg=None,
+    aoa_min_deg=None,
+    aoa_max_deg=None,
+    rho=None,
+    mu=None,
+):
     aoa = flight_aoa_guess
     elev = elevator_guess
     if elevator_limit_deg is not None:
@@ -695,7 +752,7 @@ def solve_trim(config, flight_aoa_guess, elevator_guess, max_iter=20, tol_force=
     moment_scale = max(config["weight"], 0.0) * config["wing"]["mac"]
     moment_tol = max(tol_moment, 1e-3 * moment_scale)
     for _ in range(max_iter):
-        result = run_analysis(config, aoa, elev, build_report=False)
+        result = run_analysis(config, aoa, elev, build_report=False, rho=rho, mu=mu)
         last_result = result
         f1 = result["Lift"] - config["weight"]
         f2 = result["TotalPitchMoment"]
@@ -704,8 +761,8 @@ def solve_trim(config, flight_aoa_guess, elevator_guess, max_iter=20, tol_force=
             break
         d_aoa = 0.25
         d_elev = 0.5
-        result_aoa = run_analysis(config, aoa + d_aoa, elev, build_report=False)
-        result_elev = run_analysis(config, aoa, elev + d_elev, build_report=False)
+        result_aoa = run_analysis(config, aoa + d_aoa, elev, build_report=False, rho=rho, mu=mu)
+        result_elev = run_analysis(config, aoa, elev + d_elev, build_report=False, rho=rho, mu=mu)
         f1_aoa = result_aoa["Lift"] - config["weight"]
         f2_aoa = result_aoa["TotalPitchMoment"]
         f1_elev = result_elev["Lift"] - config["weight"]

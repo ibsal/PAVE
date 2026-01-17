@@ -27,7 +27,7 @@ GustSearchMaxMps = 30.0 # search cap for worst-case gust
 
 ### Aircraft CG Definitions x = 0 at the nose 
 Xwqc = 0.45 # M
-Xhtqc = 1.8 # M
+Xhtqc = 2 # M
 Xcg = 0.2 # M
 WingZ = 0.0 # m, wing reference plane above CG
 HtailZ = 0.0 # m, htail reference plane above CG
@@ -104,8 +104,8 @@ def estimate_wing_clmax(foil, rho, mu, weight, wing_area, mac, iterations=3):
 _atm = Atmosphere(GroundLevel)
 WingClMax = estimate_wing_clmax(
     wingFoil,
-    float(_atm.density),
-    float(_atm.dynamic_viscosity),
+    float(_atm.density[0]),
+    float(_atm.dynamic_viscosity[0]),
     Weight,
     WingArea,
     WingMAC,
