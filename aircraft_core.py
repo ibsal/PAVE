@@ -24,6 +24,47 @@ def _is_zero_sweep(sweep_breaks, tol=1e-6):
     return all(abs(deg) <= tol for _, deg in sweep_breaks)
 
 
+def _foil_cl(foil, alpha_deg, reynolds):
+    if hasattr(foil, "cl"):
+        try:
+            return foil.cl(alpha_deg=alpha_deg, reynolds=reynolds)
+        except TypeError:
+            return foil.cl(alpha_deg=alpha_deg)
+    if hasattr(foil, "cl_at"):
+        return foil.cl_at(alpha_deg)
+    return 0.0
+
+
+def _foil_cd(foil, alpha_deg, reynolds):
+    if hasattr(foil, "cd"):
+        try:
+            return foil.cd(alpha_deg=alpha_deg, reynolds=reynolds)
+        except TypeError:
+            return foil.cd(alpha_deg=alpha_deg)
+    if hasattr(foil, "cd_at"):
+        return foil.cd_at(alpha_deg)
+    return 0.0
+
+
+def _foil_lift_slope(foil, reynolds, alpha_min=-2.0, alpha_max=6.0):
+    try:
+        if hasattr(foil, "cdo_and_lift_slope"):
+            try:
+                _, slope = foil.cdo_and_lift_slope(reynolds=reynolds, alpha_min=alpha_min, alpha_max=alpha_max)
+                return slope
+            except TypeError:
+                _, slope = foil.cdo_and_lift_slope(alpha_min=alpha_min, alpha_max=alpha_max)
+                return slope
+    except Exception:
+        pass
+    cl_min = _foil_cl(foil, alpha_min, reynolds)
+    cl_max = _foil_cl(foil, alpha_max, reynolds)
+    denom = alpha_max - alpha_min
+    if abs(denom) < 1e-9:
+        return 0.0
+    return (cl_max - cl_min) / denom
+
+
 def integrate_profile_drag(foil, root_chord, tip_chord, span, area_ref, alpha_deg, rho, mu, velocity, n=1000, count=1, symmetric=True, chord_breaks=None, sweep_breaks=None):
     half_span = 0.5 * span if symmetric else span
     dx = half_span / n
@@ -406,9 +447,31 @@ def run_analysis(config, flight_aoa, elevator_deflection, build_report=True, rho
     )
     htail_moment *= config["tail_efficiency"]
     htail_cm_moment *= config["tail_efficiency"]
+    htail_aoa_zero = flight_aoa + htail["incidence"] - downwash
+    htail_moment_zero, htail_cm_moment_zero = integrate_pitching_moment_about_cg(
+        htail["foil"],
+        htail["root_chord"],
+        htail["tip_chord"],
+        htail["span"],
+        htail_aoa_zero,
+        rho,
+        mu,
+        v,
+        q_dyn,
+        config["positions"]["x_htqc"],
+        config["positions"]["x_cg"],
+        n=n_span,
+        symmetric=True,
+        chord_breaks=htail["chord_breaks"],
+        sweep_breaks=htail["sweep_breaks"],
+    )
+    htail_moment_zero *= config["tail_efficiency"]
+    htail_cm_moment_zero *= config["tail_efficiency"]
     wing_total_moment = wing_moment + wing_cm_moment
     htail_total_moment = htail_moment + htail_cm_moment
+    htail_total_moment_zero = htail_moment_zero + htail_cm_moment_zero
     total_moment = wing_total_moment + htail_total_moment
+    total_moment_zero = wing_total_moment + htail_total_moment_zero
 
     cm_wing_cg = wing_total_moment / (q_dyn * wing["area"] * wing["mac"])
     cm_wing_root = (wing_moment_root + wing_cm_moment_root) / (q_dyn * wing["area"] * wing["mac"])
@@ -492,6 +555,17 @@ def run_analysis(config, flight_aoa, elevator_deflection, build_report=True, rho
         "drag_stack": drag_stack,
         "report_lines": None,
         "polar_rows": [],
+        "moments": {
+            "wing_lift": wing_moment,
+            "wing_cm": wing_cm_moment,
+            "tail_lift": htail_moment,
+            "tail_cm": htail_cm_moment,
+            "tail_total": htail_total_moment,
+            "tail_total_zero": htail_total_moment_zero,
+            "elevator_delta": htail_total_moment - htail_total_moment_zero,
+            "total_zero": total_moment_zero,
+            "total": total_moment,
+        },
     }
 
     if not build_report:
@@ -737,7 +811,19 @@ def solve_trim(
     aoa_max_deg=None,
     rho=None,
     mu=None,
+    fast_linear=False,
 ):
+    if fast_linear:
+        return solve_trim_linearized(
+            config,
+            flight_aoa_guess,
+            elevator_guess,
+            elevator_limit_deg=elevator_limit_deg,
+            aoa_min_deg=aoa_min_deg,
+            aoa_max_deg=aoa_max_deg,
+            rho=rho,
+            mu=mu,
+        )
     aoa = flight_aoa_guess
     elev = elevator_guess
     if elevator_limit_deg is not None:
@@ -786,6 +872,161 @@ def solve_trim(
             aoa = min(aoa, aoa_max_deg)
     return aoa, elev, converged, last_result
 
+
+def solve_trim_linearized(
+    config,
+    flight_aoa_guess,
+    elevator_guess,
+    elevator_limit_deg=None,
+    aoa_min_deg=None,
+    aoa_max_deg=None,
+    rho=None,
+    mu=None,
+):
+    v = config["flight_velocity"]
+    if rho is None or mu is None:
+        rho, mu = _atm_properties(float(config["analysis_altitude_m"]))
+    if mu <= 0.0 or v <= 0.0:
+        return flight_aoa_guess, elevator_guess, False, None
+
+    wing = config["wing"]
+    htail = config["htail"]
+    vtail = config["vtail"]
+    pos = config["positions"]
+    tail_eff = config.get("tail_efficiency", 1.0)
+    downwash = config.get("downwash_factor", 0.0)
+    elevator_tau = config.get("elevator_tau", 0.0)
+
+    wing_area = wing["area"]
+    htail_area = htail["area"]
+    vtail_area = vtail["area"]
+    if wing_area <= 0.0 or htail_area <= 0.0:
+        return flight_aoa_guess, elevator_guess, False, None
+
+    re_w = rho * v * wing["mac"] / mu
+    re_h = rho * v * htail["mac"] / mu
+    re_v = rho * v * vtail["mac"] / mu
+
+    alpha_center = config.get("fast_linear_alpha_center_deg", 3.5)
+    alpha_half_range = config.get("fast_linear_alpha_half_range_deg", 1.5)
+    alpha_min = alpha_center - alpha_half_range
+    alpha_max = alpha_center + alpha_half_range
+    if alpha_min >= alpha_max:
+        alpha_min = 2.0
+        alpha_max = 6.0
+
+    aw = _foil_lift_slope(wing["foil"], re_w, alpha_min=alpha_min, alpha_max=alpha_max)
+    ah = _foil_lift_slope(htail["foil"], re_h, alpha_min=alpha_min, alpha_max=alpha_max)
+    if abs(aw) < 1e-9 or abs(ah) < 1e-9:
+        return flight_aoa_guess, elevator_guess, False, None
+
+    cl0_w = _foil_cl(wing["foil"], 0.0, re_w)
+    cl0_h = _foil_cl(htail["foil"], 0.0, re_h)
+    alpha0_w = -cl0_w / aw
+    alpha0_h = -cl0_h / ah
+
+    i_w = wing["incidence"]
+    i_h = htail["incidence"]
+    ratio = htail_area / wing_area
+
+    q_dyn = 0.5 * rho * (v ** 2)
+    cl_req = config["weight"] / (q_dyn * wing_area)
+
+    a1 = aw + tail_eff * ah * (1.0 - downwash) * ratio
+    b1 = tail_eff * ah * elevator_tau * ratio
+    c1 = aw * (i_w - alpha0_w) + tail_eff * ah * (i_h - i_w * downwash - alpha0_h) * ratio
+
+    arm_w = pos["x_wqc"] - pos["x_cg"]
+    arm_h = pos["x_htqc"] - pos["x_cg"]
+    a2 = -aw * arm_w - tail_eff * ah * (1.0 - downwash) * ratio * arm_h
+    b2 = -tail_eff * ah * elevator_tau * ratio * arm_h
+    c2 = -aw * (i_w - alpha0_w) * arm_w - tail_eff * ah * (i_h - i_w * downwash - alpha0_h) * ratio * arm_h
+
+    det = a1 * b2 - a2 * b1
+    if abs(det) < 1e-9:
+        return flight_aoa_guess, elevator_guess, False, None
+
+    rhs1 = cl_req - c1
+    rhs2 = -c2
+    aoa = (rhs1 * b2 - rhs2 * b1) / det
+    elev = (a1 * rhs2 - a2 * rhs1) / det
+    converged = True
+
+    aoa_clamped = False
+    elev_clamped = False
+    if elevator_limit_deg is not None:
+        elev_new = max(min(elev, elevator_limit_deg), -elevator_limit_deg)
+        elev_clamped = elev_new != elev
+        elev = elev_new
+    if aoa_min_deg is not None:
+        aoa_new = max(aoa, aoa_min_deg)
+        aoa_clamped = aoa_new != aoa
+        aoa = aoa_new
+    if aoa_max_deg is not None:
+        aoa_new = min(aoa, aoa_max_deg)
+        aoa_clamped = aoa_new != aoa
+        aoa = aoa_new
+    if aoa_clamped or elev_clamped:
+        converged = False
+
+    alpha_w = aoa + i_w
+    alpha_t = aoa + i_h - downwash * alpha_w + elevator_tau * elev
+    cl_w = aw * (alpha_w - alpha0_w)
+    cl_t = ah * (alpha_t - alpha0_h) * ratio
+    cl_t_eff = cl_t * tail_eff
+
+    cd_w = _foil_cd(wing["foil"], alpha_w, re_w)
+    cd_h = _foil_cd(htail["foil"], alpha_t, re_h) * ratio * tail_eff
+    cd_v = _foil_cd(vtail["foil"], vtail["incidence"], re_v) * (vtail_area / wing_area)
+
+    cd_non_lifting, _, _, _, _, _, _, _, _ = non_lifting_drag_stack(config, rho, mu, v)
+
+    if _is_zero_sweep(wing["sweep_breaks"]):
+        ar_eff = wing["ar"]
+    else:
+        ar_eff = wing["ar"] * sweep_correction_factor(wing["span"], config["n_span"], True, wing["sweep_breaks"])
+    e_oswald_w = 1.78 * (1.0 - 0.045 * (wing["ar"] ** 0.68)) - 0.64
+    e_oswald_w = min(max(e_oswald_w, 0.3), 0.95)
+    cd_w_induced = cl_w**2 / (math.pi * ar_eff * e_oswald_w) if ar_eff > 0.0 else 0.0
+
+    if _is_zero_sweep(htail["sweep_breaks"]):
+        har_eff = htail["ar"]
+    else:
+        har_eff = htail["ar"] * sweep_correction_factor(htail["span"], config["n_span"], True, htail["sweep_breaks"])
+    e_oswald_h = 1.78 * (1.0 - 0.045 * (htail["ar"] ** 0.68)) - 0.64
+    e_oswald_h = min(max(e_oswald_h, 0.3), 0.95)
+    if htail_area > 0.0:
+        cd_htail_induced = (cl_t_eff**2) * (wing_area / htail_area) / (math.pi * har_eff * e_oswald_h) if har_eff > 0.0 else 0.0
+    else:
+        cd_htail_induced = 0.0
+
+    cd0 = config["cd_misc"] + cd_w + cd_h + cd_v + cd_non_lifting
+    cd_induced = cd_w_induced + cd_htail_induced
+    cd_total = cd0 + cd_induced
+
+    lift = q_dyn * wing_area * (cl_w + cl_t_eff)
+    drag = q_dyn * wing_area * cd_total
+    moment_coeff = -cl_w * arm_w - cl_t_eff * arm_h
+    moment = q_dyn * wing_area * moment_coeff
+
+    result = {
+        "Lift": lift,
+        "Drag": drag,
+        "TotalPitchMoment": moment,
+        "ClWing": cl_w,
+        "ClTail": cl_t_eff,
+        "ClTotal": cl_w + cl_t_eff,
+        "Cd0": cd0,
+        "CdInduced": cd_induced,
+        "CdTotal": cd_total,
+        "AOA": aoa,
+        "HTailAOA": alpha_t,
+        "ClAlphaWing": aw,
+        "ClAlphaTail": ah,
+        "LinearAlphaCenter": alpha_center,
+        "LinearAlphaRange": alpha_half_range,
+    }
+    return aoa, elev, converged, result
 
 def build_aircraft_config(
     ground_level,

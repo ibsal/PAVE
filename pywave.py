@@ -15,7 +15,7 @@ FuselageLaminarFrac = 0.3
 BoomLaminarFrac = 0.04
 MaxPowerW = 4000.0
 PropEff = 0.59
-BatteryEnergyJ = 7920000
+BatteryEnergyJ = 7992000
 mission_systems_power = 50.24
 MaxThrustN = 152.0
 CruiseWindMps = 8.6 # +X tailwind, -X headwind
@@ -54,9 +54,9 @@ HRootChord = 0.386 #M
 HMidChord = 0.2286
 HMidChordPos = 0.8 # fraction of half span from root to tip (0-1)
 HTipChord = 0.1 #M
-HRootThickness = 0.1
-HTipThickness = 0.1
-HSpan = 2 #M, total span (both sides)
+HRootThickness = 0.075
+HTipThickness = 0.075
+HSpan = 1 #M, total span (both sides)
 HRootSweepDeg = 0.0
 HMidSweepDeg = 0.0
 HMidSweepPos = 0.4 # fraction of half span from root to tip (0-1)
@@ -66,8 +66,8 @@ VRootChord = 0.1 #M
 VMidChord = 0.1
 VMidChordPos = 0.4 # fraction of span from root to tip (0-1)
 VTipChord = 0.1 #M
-VRootThickness = 0.1
-VTipThickness = 0.1
+VRootThickness = 0.075
+VTipThickness = 0.075
 VSpan = 1 #M, span per tail
 VRootSweepDeg = 0.0
 VMidSweepDeg = 0.0
@@ -76,7 +76,7 @@ VTipSweepDeg = 0.0
 Hfoil = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
 Vfoil = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
 VtailCount = 2
-HtailIncidence = 3 # deg, standard convention: incidence > 0 -> tail angled with TE down
+HtailIncidence = -3 # deg, standard convention: incidence > 0 -> tail angled with TE down
 VtailIncidence = 0 # deg
 
 WingTaper = TipChord / RootChord
@@ -650,6 +650,27 @@ else:
         ],
         align=["<", ">"],
     )
+    moments = loiter_report.get("moments", {})
+    if moments:
+        total_moment = moments.get("total", 0.0)
+        def moment_pct(value):
+            return f"{(100.0 * value / total_moment):.1f}%" if abs(total_moment) > 1e-9 else "n/a"
+        print_table(
+            "Pitching Moments (Cruise)",
+            ["Contributor", "Moment (N*m)", "% Total"],
+            [
+                ["Wing Lift", f"{moments.get('wing_lift', 0.0):.3f}", moment_pct(moments.get("wing_lift", 0.0))],
+                ["Wing Cm", f"{moments.get('wing_cm', 0.0):.3f}", moment_pct(moments.get("wing_cm", 0.0))],
+                ["Tail Lift", f"{moments.get('tail_lift', 0.0):.3f}", moment_pct(moments.get("tail_lift", 0.0))],
+                ["Tail Cm", f"{moments.get('tail_cm', 0.0):.3f}", moment_pct(moments.get("tail_cm", 0.0))],
+                ["Tail Total", f"{moments.get('tail_total', 0.0):.3f}", moment_pct(moments.get("tail_total", 0.0))],
+                ["Tail Total @ 0 Elev", f"{moments.get('tail_total_zero', 0.0):.3f}", moment_pct(moments.get("tail_total_zero", 0.0))],
+                ["Elevator Delta", f"{moments.get('elevator_delta', 0.0):.3f}", moment_pct(moments.get("elevator_delta", 0.0))],
+                ["Total @ 0 Elev", f"{moments.get('total_zero', 0.0):.3f}", moment_pct(moments.get("total_zero", 0.0))],
+                ["Total", f"{total_moment:.3f}", "100.0%" if abs(total_moment) > 1e-9 else "n/a"],
+            ],
+            align=["<", ">", ">"],
+        )
     stability = stability_derivatives(config, loiter_aoa, loiter_elev)
     cm_alpha_rad = stability["cm_alpha_deg"] * (180.0 / math.pi)
     cl_alpha_rad = stability["cl_alpha_deg"] * (180.0 / math.pi)
