@@ -27,8 +27,8 @@ GustSearchMaxMps = 30.0 # search cap for worst-case gust
 
 ### Aircraft CG Definitions x = 0 at the nose 
 Xwqc = 0.45 # M
-Xhtqc = 1.35 # M
-Xcg = 0.445 # M
+Xhtqc = 1.1 # M
+Xcg = 0.45-0.15 # M
 WingZ = 0.0 # m, wing reference plane above CG
 HtailZ = 0.0 # m, htail reference plane above CG
 VtailZ = 0.2 # m, vtail reference plane above CG
