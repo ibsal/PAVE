@@ -9,7 +9,7 @@ from mission_model import AircraftModel, MissionProfile, MissionSegment, simulat
 GroundLevel = 0 # M, ASL
 TailEfficiency = 0.95 # q_tail / q_wing (0.9-1.0 typical). Scales tail Cl and Cd
 ElevatorEffectivenessTau = 0.45 # deg tail alpha per deg elevator (0.3-0.6 typical)
-Weight = 205 #N = 45 lbf
+Weight = 205 #N = 44 lbf
 SurfaceRoughness = 0.00635e-3 # m, equivalent sand grain roughness (0 for smooth)
 FuselageLaminarFrac = 0.3
 BoomLaminarFrac = 0.04
@@ -27,21 +27,21 @@ GustSearchMaxMps = 30.0 # search cap for worst-case gust
 
 ### Aircraft CG Definitions x = 0 at the nose 
 Xwqc = 0.45 # M
-Xhtqc = 2 # M
-Xcg = 0.2 # M
+Xhtqc = 1.35 # M
+Xcg = 0.445 # M
 WingZ = 0.0 # m, wing reference plane above CG
 HtailZ = 0.0 # m, htail reference plane above CG
 VtailZ = 0.2 # m, vtail reference plane above CG
 EngineZ = 0.0 # m, thrust line above CG
 
 ### Wing Definition
-RootChord = 0.3
-MidChord = 0.3
+RootChord = 0.305
+MidChord = 0.305
 MidChordPos = 0.4 # fraction of half span from root to tip (0-1)
-TipChord = 0.3
-RootThickness = 0.1
-TipThickness = 0.1
-Span = 5 #M, wing span (both sides)
+TipChord = 0.305
+RootThickness = 0.097
+TipThickness = 0.097
+Span = 4.436 #M, wing span (both sides)
 RootSweepDeg = 0.0
 MidSweepDeg = 0
 MidSweepPos = 0.4 # fraction of half span from root to tip (0-1)
@@ -50,25 +50,25 @@ wingFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="psu94097")
 WingIncidence = 1
 
 ### Horizontal and Vertical Tail Definition
-HRootChord = 0.386 #M
-HMidChord = 0.2286
+HRootChord = 0.231 #M
+HMidChord = 0.231
 HMidChordPos = 0.8 # fraction of half span from root to tip (0-1)
-HTipChord = 0.1 #M
+HTipChord = 0.231 #M
 HRootThickness = 0.075
 HTipThickness = 0.075
-HSpan = 1 #M, total span (both sides)
+HSpan = 1.387 #M, total span (both sides)
 HRootSweepDeg = 0.0
 HMidSweepDeg = 0.0
 HMidSweepPos = 0.4 # fraction of half span from root to tip (0-1)
 HTipSweepDeg = 0.0
 
-VRootChord = 0.1 #M
-VMidChord = 0.1
+VRootChord = 0.2 #M
+VMidChord = 0.2
 VMidChordPos = 0.4 # fraction of span from root to tip (0-1)
-VTipChord = 0.1 #M
+VTipChord = 0.2 #M
 VRootThickness = 0.075
 VTipThickness = 0.075
-VSpan = 1 #M, span per tail
+VSpan = 0.5 #M, span per tail
 VRootSweepDeg = 0.0
 VMidSweepDeg = 0.0
 VMidSweepPos = 0.4 # fraction of span from root to tip (0-1)
@@ -135,7 +135,7 @@ config = build_aircraft_config(
     tail_efficiency=TailEfficiency,
     elevator_tau=ElevatorEffectivenessTau,
     downwash_factor=0.45,
-    cd_misc=0.005,
+    cd_misc=0.01,
     x_wqc=Xwqc,
     x_htqc=Xhtqc,
     x_cg=Xcg,
@@ -211,7 +211,7 @@ profile = MissionProfile(
     ],
     log_interval = 0.1,
     takeoff_aero_stride=5,
-    n_span=300,
+    n_span=1000,
     power_derate_frac=0.0,
     energy_reserve_frac=0.2,
     wind_mps=CruiseWindMps,
@@ -240,7 +240,7 @@ def print_table(title, headers, rows, align=None):
         print(" ".join(f"{cell:{align[i]}{widths[i]}}" for i, cell in enumerate(row)))
 
 
-def stability_derivatives(config, aoa_deg, elev_deg, d_aoa=0.25, d_elev=1.0):
+def stability_derivatives(config, aoa_deg, elev_deg, d_aoa=0.01, d_elev=1.0):
     # Central differences for longitudinal derivatives at the specified trim condition.
     plus = run_analysis(config, aoa_deg + d_aoa, elev_deg, build_report=False)
     minus = run_analysis(config, aoa_deg - d_aoa, elev_deg, build_report=False)
@@ -647,6 +647,29 @@ else:
             ["Motor Power", f"{motor_power:.1f} W"],
             ["Cm Total", f"{loiter_report.get('CmTotal', 0.0):.6f}"],
             ["Cm Wing CG", f"{loiter_report.get('CmWingCG', 0.0):.6f}"],
+        ],
+        align=["<", ">"],
+    )
+    atm = Atmosphere(config["analysis_altitude_m"])
+    rho = float(atm.density)
+    q_dyn = 0.5 * rho * v_avg * v_avg
+    cl_wing = loiter_report.get("ClWing", 0.0)
+    cl_tail = loiter_report.get("ClTail", 0.0)
+    cl_total = loiter_report.get("ClTotal", 0.0)
+    wing_lift = q_dyn * wing_area * cl_wing
+    tail_lift = q_dyn * wing_area * cl_tail
+    total_lift = q_dyn * wing_area * cl_total
+    tail_frac = (100.0 * tail_lift / total_lift) if abs(total_lift) > 1e-9 else 0.0
+    lift_ratio = (total_lift / Weight) if Weight > 0.0 else 0.0
+    print_table(
+        "Lift Breakdown (Cruise)",
+        ["Item", "Value"],
+        [
+            ["Wing Lift", f"{wing_lift:.1f} N"],
+            ["Tail Lift", f"{tail_lift:.1f} N ({tail_frac:.1f}%)"],
+            ["Total Lift", f"{total_lift:.1f} N"],
+            ["Weight", f"{Weight:.1f} N"],
+            ["Lift/Weight", f"{lift_ratio:.3f}"],
         ],
         align=["<", ">"],
     )

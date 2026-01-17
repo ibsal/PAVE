@@ -20,24 +20,24 @@ FAST_LINEAR_TRIM = True
 FAST_LINEAR_ALPHA_CENTER_DEG = 2.5
 FAST_LINEAR_ALPHA_HALF_RANGE_DEG = 1.5
 
+DESIGN_POINT_SCALE = 1.5
+
 WING_SPAN_MIN_M = 3.6
 WING_SPAN_MAX_M = 4.5
-WING_SPAN_STEPS = 10
+WING_SPAN_STEPS = max(1, int(math.ceil(10 * DESIGN_POINT_SCALE)))
 
 WING_CHORD_MIN_M = 0.3048
 WING_CHORD_MAX_M = 0.4
-WING_CHORD_STEPS = 10
-
-DESIGN_POINT_SCALE = 1.0
+WING_CHORD_STEPS = max(1, int(math.ceil(10 * DESIGN_POINT_SCALE)))
 
 HTAIL_X_MODE = "solve_volume"
 HTAIL_X_MIN_M = 1.2
 HTAIL_X_MAX_M = 1.5
-HTAIL_X_STEPS = 10
+HTAIL_X_STEPS = max(1, int(math.ceil(10 * DESIGN_POINT_SCALE)))
 
 HTAIL_AR_MIN = 2.0
 HTAIL_AR_MAX = 6.0
-HTAIL_AR_STEPS = 5
+HTAIL_AR_STEPS = max(1, int(math.ceil(5 * DESIGN_POINT_SCALE)))
 HTAIL_SPAN_SCALE_MIN = 0.3
 HTAIL_SPAN_SCALE_MAX = 3.0
 HTAIL_CHORD_SCALE_MIN = 0.3
@@ -59,6 +59,9 @@ ENERGY_RESERVE_FRAC = 0.2
 
 SURFACE_AREAL_DENSITY_KG_M2 = 3.25
 PROGRESS_EVERY = 1
+PLOT_BEST_DESIGN = True
+PLOT_SAVE_PATH = "best_design.png"
+PLOT_SHOW = False
 
 DEBUG_NEUTRAL_POINT = False
 DEBUG_NEUTRAL_POINT_ONLY = False
@@ -145,15 +148,6 @@ def linspace(min_val, max_val, steps):
         return [min_val]
     step = (max_val - min_val) / (steps - 1)
     return [min_val + i * step for i in range(steps)]
-
-
-def scaled_steps(steps):
-    if steps <= 1:
-        return 1
-    scale = DESIGN_POINT_SCALE if DESIGN_POINT_SCALE is not None else 1.0
-    if scale <= 0.0:
-        scale = 1.0
-    return max(1, int(math.ceil(steps * scale)))
 
 
 def foil_alpha_limits(foil):
@@ -884,6 +878,85 @@ def debug_neutral_point(rho, mu):
     config["positions"]["x_cg"] = base_x_cg
 
 
+def plot_best_design(best):
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+    except ImportError:
+        print("Plot skipped: matplotlib not available.")
+        return
+
+    wing_span = best["wing_span_m"]
+    wing_chord = best["wing_chord_m"]
+    htail_span = best["htail_span_m"]
+    htail_chord = best["htail_root_chord_m"]
+
+    wing_le = XWQC_M - 0.25 * wing_chord
+    htail_le = best["htail_x_m"] - 0.25 * htail_chord
+
+    fuselage_x = 0.0
+    fuselage_length = FUSELAGE_LENGTH_M
+    fuselage_width = FUSELAGE_WIDTH_M
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.add_patch(
+        Rectangle(
+            (wing_le, -0.5 * wing_span),
+            wing_chord,
+            wing_span,
+            facecolor="#7da3d8",
+            edgecolor="black",
+            alpha=0.6,
+            label="Wing",
+        )
+    )
+    ax.add_patch(
+        Rectangle(
+            (htail_le, -0.5 * htail_span),
+            htail_chord,
+            htail_span,
+            facecolor="#d6b36b",
+            edgecolor="black",
+            alpha=0.6,
+            label="Htail",
+        )
+    )
+    ax.add_patch(
+        Rectangle(
+            (fuselage_x, -0.5 * fuselage_width),
+            fuselage_length,
+            fuselage_width,
+            facecolor="#b0b0b0",
+            edgecolor="black",
+            alpha=0.7,
+            label="Fuselage",
+        )
+    )
+    if best.get("x_cg_m") is not None:
+        ax.plot(best["x_cg_m"], 0.0, "ko", label="CG")
+    if best.get("x_np_m") is not None:
+        ax.plot(best["x_np_m"], 0.0, "k^", label="NP")
+
+    x_min = min(wing_le, htail_le, fuselage_x) - 0.2
+    x_max = max(wing_le + wing_chord, htail_le + htail_chord, fuselage_x + fuselage_length) + 0.2
+    y_max = 0.6 * max(wing_span, htail_span, fuselage_width)
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(-y_max, y_max)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.set_title("Top View Planform")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize="small")
+
+    if PLOT_SAVE_PATH:
+        fig.savefig(PLOT_SAVE_PATH, dpi=150, bbox_inches="tight")
+        print(f"Saved plot to {PLOT_SAVE_PATH}")
+    if PLOT_SHOW:
+        plt.show()
+    plt.close(fig)
+
+
 def main():
     best = None
     wing_spans = linspace(WING_SPAN_MIN_M, WING_SPAN_MAX_M, WING_SPAN_STEPS)
@@ -1238,6 +1311,8 @@ def main():
         ],
     )
     print_failure_summary(failure_counts)
+    if PLOT_BEST_DESIGN:
+        plot_best_design(best)
 
 
 if __name__ == "__main__":
