@@ -8,7 +8,7 @@ from ambiance import Atmosphere
 @lru_cache(maxsize=128)
 def _atm_properties(altitude_m):
     atm = Atmosphere(altitude_m)
-    return float(atm.density), float(atm.dynamic_viscosity)
+    return float(atm.density[0]), float(atm.dynamic_viscosity[0])
 
 
 def _is_constant_chord(root_chord, tip_chord, chord_breaks, tol=1e-6):
