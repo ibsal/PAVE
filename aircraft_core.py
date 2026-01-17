@@ -794,6 +794,10 @@ def build_aircraft_config(
     prop_eff,
     battery_energy_j,
     max_thrust_n,
+    wing_z=0.0,
+    htail_z=0.0,
+    vtail_z=0.0,
+    engine_z=0.0,
     n_span=1000,
 ):
     fuselage_perimeter = fuselage_height * 2 + fuselage_width * 2 * fuselage_pfactor
@@ -847,6 +851,10 @@ def build_aircraft_config(
             "x_wqc": x_wqc,
             "x_htqc": x_htqc,
             "x_cg": x_cg,
+            "z_wing": wing_z,
+            "z_htail": htail_z,
+            "z_vtail": vtail_z,
+            "z_engine": engine_z,
         },
         "roughness": {
             "k": roughness_k,

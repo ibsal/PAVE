@@ -45,6 +45,8 @@ class MissionProfile:
     power_derate_frac: float | None = None
     energy_reserve_frac: float | None = None
     max_aoa_deg: float | None = None
+    wind_mps: float = 0.0
+    loiter_wind_mode: str = "head_tail_avg"
 
 
 @dataclass
@@ -61,6 +63,7 @@ class MissionSegment:
     mode: str | None = None
     elevator_deg: float | None = None
     thrust_scale: float | None = None
+    wind_mps: float | None = None
 
 
 class AircraftModel:
@@ -414,6 +417,14 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
         while idx < len(segments) and segments[idx].kind == "takeoff":
             idx += 1
         return idx
+
+    def segment_wind_mps(seg):
+        if seg is None:
+            return 0.0
+        wind = seg.wind_mps if seg.wind_mps is not None else profile.wind_mps
+        if seg.kind == "loiter" and profile.loiter_wind_mode == "head_tail_avg":
+            return 0.0
+        return wind
     next_log_time = 0.0
     last_aero = None
     takeoff_elevator = 0.0
@@ -862,8 +873,10 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                                 remaining_alt = seg.target_alt - state.h
                                 if remaining_alt > 0.0:
                                     step_dt = remaining_alt / vertical_speed
+                        wind_mps = segment_wind_mps(seg)
+                        ground_speed = v_next * math.cos(gamma_next) + wind_mps
                         h_next = state.h + v_next * math.sin(gamma_next) * step_dt
-                        x_next = state.x + v_next * math.cos(gamma_next) * step_dt
+                        x_next = state.x + ground_speed * step_dt
                         if seg.dt is None and seg.target_alt is not None and h_next >= seg.target_alt:
                             h_next = seg.target_alt
                             phase = "segment_done"
@@ -922,8 +935,10 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                                 remaining_alt = state.h - seg.target_alt
                                 if remaining_alt > 0.0:
                                     step_dt = remaining_alt / (-vertical_speed)
+                        wind_mps = segment_wind_mps(seg)
+                        ground_speed = v_next * math.cos(gamma_next) + wind_mps
                         h_next = max(state.h + v_next * math.sin(gamma_next) * step_dt, seg.target_alt)
-                        x_next = state.x + v_next * math.cos(gamma_next) * step_dt
+                        x_next = state.x + ground_speed * step_dt
                         phase = "segment_done" if h_next <= seg.target_alt else seg.kind
                     elif seg.kind in ("cruise", "loiter"):
                         if cruise_trim_segment_index != segment_index:
@@ -1044,7 +1059,8 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                             time_limit = segment_time_limit[segment_index]
                         if seg.dt is None:
                             fast_dt = None
-                            ground_speed = v_next * math.cos(gamma_next)
+                            wind_mps = segment_wind_mps(seg)
+                            ground_speed = v_next * math.cos(gamma_next) + wind_mps
                             if seg.distance is not None and ground_speed > 1e-6:
                                 remaining = seg.distance - segment_distance
                                 if remaining > 0.0:
@@ -1055,10 +1071,12 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                                     fast_dt = remaining
                             if fast_dt is not None:
                                 step_dt = fast_dt
+                        wind_mps = segment_wind_mps(seg)
+                        ground_speed = v_next * math.cos(gamma_next) + wind_mps
                         h_next = state.h + v_next * math.sin(gamma_next) * step_dt if seg.target_alt is None else seg.target_alt
-                        x_next = state.x + v_next * math.cos(gamma_next) * step_dt
+                        x_next = state.x + ground_speed * step_dt
                         segment_time += step_dt
-                        segment_distance += v_next * math.cos(gamma_next) * step_dt
+                        segment_distance += ground_speed * step_dt
                         if seg.distance is not None:
                             phase = "segment_done" if segment_distance >= seg.distance else seg.kind
                         else:
@@ -1094,8 +1112,10 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                             vertical_speed = v_next * math.sin(gamma_next)
                             if vertical_speed < -1e-6 and state.h > 0.0:
                                 step_dt = state.h / (-vertical_speed)
+                        wind_mps = segment_wind_mps(seg)
+                        ground_speed = v_next * math.cos(gamma_next) + wind_mps
                         h_next = max(state.h + v_next * math.sin(gamma_next) * step_dt, 0.0)
-                        x_next = state.x + v_next * math.cos(gamma_next) * step_dt
+                        x_next = state.x + ground_speed * step_dt
                         phase = "landed" if h_next <= 0.0 else seg.kind
                     else:
                         break
