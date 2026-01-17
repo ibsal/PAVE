@@ -479,6 +479,10 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
     power_derate = max(0.0, min(power_derate, 0.9))
     energy_reserve = max(0.0, min(energy_reserve, 0.9))
     power_limit = cfg["propulsion"]["max_power_w"] * (1.0 - power_derate)
+    mission_systems_power = cfg["propulsion"].get("mission_systems_power", 0.0)
+    if mission_systems_power is None:
+        mission_systems_power = 0.0
+    mission_systems_power = max(mission_systems_power, 0.0)
 
     def available_thrust(v, rho):
         return model.thrust_available(v, rho, power_limit_w=power_limit)
@@ -1054,7 +1058,8 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                                 energy_reserve_j = cfg["propulsion"]["battery_energy_j"] * energy_reserve
                                 available_energy = max(state.energy_j - energy_reserve_j, 0.0)
                                 power_required = max(trim_result["Drag"], 0.0) * v_next / cfg["propulsion"]["prop_eff"]
-                                power_used = max(min(power_required, power_limit), 1e-6)
+                                prop_power_used = max(min(power_required, power_limit), 0.0)
+                                power_used = max(prop_power_used + mission_systems_power, 1e-6)
                                 segment_time_limit[segment_index] = available_energy / power_used
                             time_limit = segment_time_limit[segment_index]
                         if seg.dt is None:
@@ -1141,8 +1146,9 @@ def simulate_mission(model, profile, initial_alt, return_summary=False):
                 throttle = thrust_used / thrust_cap
             else:
                 throttle = 0.0
-            power_used = power_limit * min(max(throttle, 0.0), 1.0)
-            energy_next = max(state.energy_j - power_used * step_dt, 0.0)
+            prop_power_used = power_limit * min(max(throttle, 0.0), 1.0)
+            total_power_used = prop_power_used + mission_systems_power
+            energy_next = max(state.energy_j - total_power_used * step_dt, 0.0)
         
             state = MissionState(
                 t=state.t + step_dt,

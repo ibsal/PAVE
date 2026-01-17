@@ -16,6 +16,7 @@ BoomLaminarFrac = 0.04
 MaxPowerW = 4000.0
 PropEff = 0.59
 BatteryEnergyJ = 7920000
+mission_systems_power = 50.24
 MaxThrustN = 152.0
 CruiseWindMps = 8.6 # +X tailwind, -X headwind
 OrbitWindMps =  8.6 # +X tailwind, -X headwind
@@ -195,6 +196,7 @@ config = build_aircraft_config(
     battery_energy_j=BatteryEnergyJ,
     max_thrust_n=MaxThrustN,
 )
+config["propulsion"]["mission_systems_power"] = mission_systems_power
 
 model = AircraftModel(config)
 profile = MissionProfile(
