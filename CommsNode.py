@@ -531,12 +531,12 @@ def optimize_endurance(
     bounds = [
         (3.0, 4.5),      # wingSpan
         (0.24, 0.60),    # wingChord
-        (0.60, 3.0),     # hSpan
+        (0.60, 2.0),     # hSpan
         (0.08, 0.40),    # hChord
-        (xcg + 0.2, xcg + 4.0),  # xhtqc
+        (xcg + 0.2, xcg + 2.0),  # xhtqc
         (0.20, 2.0),     # vHeight
         (0.08, 0.40),    # vChord
-        (xcg + 0.2, xcg + 4.0),  # xvtqc
+        (xcg + 0.2, xcg + 2.0),  # xvtqc
     ]
 
     rng = np.random.default_rng(int(seed))
@@ -608,8 +608,8 @@ best = optimize_endurance(
     levelFlightMargin=1.25,
     res=20,
     seed=1,
-    maxiter=20,
-    popsize=6,
-    polish=True
+    maxiter=4,
+    popsize=3,
+    polish=False
 )
 print(best)
