@@ -416,6 +416,9 @@ def optimize_endurance(
     boomMassFixed = 0.0
     boomLengthMin = 0.05
 
+    evalCount = 0
+    bestSeen = {"pwr": 1e30}
+
     def build_aircraft(x):
         print("Iteration +1")
         wingSpan = float(x[0])
@@ -510,6 +513,8 @@ def optimize_endurance(
         return commsNode, totalMass
 
     def objective(x):
+        nonlocal evalCount, bestSeen
+        evalCount += 1
         wingSpan = float(x[0])
         wingChord = float(x[1])
         xwqc = float(x[2])
@@ -565,11 +570,13 @@ def optimize_endurance(
         if cma > 0:
             return 1e30
         
+        pwr = float(pwr)
+
         if pwr < bestSeen["pwr"]:
             bestSeen["pwr"] = pwr
             print(f"[best] eval={evalCount} pwr={pwr:.2f} W x={np.array(x, dtype=float)}")
 
-        return float(pwr)
+        return pwr
 
     bounds = [
         (3.0, 4.5),
