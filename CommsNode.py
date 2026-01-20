@@ -377,8 +377,9 @@ body = Fuselage(1, .3, 0.3, 0.9, 0.00635e-3, 0.3)
 booms = Fuselage(1.4, .03, 0.03, 1, 0.00635e-3, 0.05)
 batteryElectric = Powerplant(7992000, 0.59, 4000)
 commsNode = Aircraft(200, 20, batteryElectric, mainWing, hwing, vwing, [body, booms], 0, 0, 0.5,200, 0.01)
-'''
 
+print(commsNode.solveBestVelocity(1.25))
+'''
 
 
 
@@ -402,8 +403,8 @@ def optimize_endurance(
     levelFlightMargin=1.25,
     res=60,
     seed=1,
-    maxiter=60,
-    popsize=12,
+    maxiter=30,
+    popsize=6,
     polish=True,
 ):
     arealDensityMain = 3.0
@@ -488,7 +489,7 @@ def optimize_endurance(
         vHeight = float(x[5])
         vChord = float(x[6])
         xvtqc = float(x[7])
-
+        print("Running objective")
         if wingSpan <= 0.0 or wingChord <= 0.0 or hSpan <= 0.0 or hChord <= 0.0 or vHeight <= 0.0 or vChord <= 0.0:
             return 1e30
 
@@ -498,6 +499,7 @@ def optimize_endurance(
         try:
             commsNode, totalMass = build_aircraft(x)
         except Exception:
+            print("build aircraft failed")
             return 1e30
 
         if totalMass > float(totalMassMax):
@@ -506,6 +508,7 @@ def optimize_endurance(
         try:
             vbest, pwr, thrust = commsNode.solveBestVelocity(levelFlightMargin, vguess=20.0, res=res)
         except Exception:
+            print("solve best velocity failed")
             return 1e30
 
         if not np.isfinite(pwr) or pwr <= 0.0:
@@ -517,6 +520,7 @@ def optimize_endurance(
         try:
             sm = float(commsNode.staticMargin())
         except Exception:
+            print("static margin failed")
             return 1e30
 
         if (sm < float(staticMarginMin)) or (sm > float(staticMarginMax)):
@@ -525,8 +529,8 @@ def optimize_endurance(
         return float(pwr)
 
     bounds = [
-        (2.0, 8.0),      # wingSpan
-        (0.15, 0.60),    # wingChord
+        (3.0, 4.5),      # wingSpan
+        (0.24, 0.60),    # wingChord
         (0.60, 3.0),     # hSpan
         (0.08, 0.40),    # hChord
         (xcg + 0.2, xcg + 4.0),  # xhtqc
@@ -554,6 +558,7 @@ def optimize_endurance(
         init="latinhypercube",
         updating="deferred",
         workers=1,
+        disp=True
     )
 
     xbest = result.x
@@ -594,17 +599,17 @@ best = optimize_endurance(
      altitude=200,
     batteryElectric=batteryElectric,
     fuselages=[body, booms],
-    xcg=0.5,
+    xcg=0.45,
     cdomisc=0.01,
     baseMass=18.0,
-    totalMassMax=30.0,
+    totalMassMax=24.9,
     staticMarginMin=0.05,
     staticMarginMax=0.30,
     levelFlightMargin=1.25,
-    res=60,
+    res=20,
     seed=1,
-    maxiter=60,
-    popsize=12,
-    polish=True,
+    maxiter=20,
+    popsize=6,
+    polish=True
 )
 print(best)

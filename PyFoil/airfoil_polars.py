@@ -82,8 +82,8 @@ def _interp1(
     1D linear interpolation (sorted internally).
     If clamp=True, clamps queries to endpoints (no extrapolation).
     """
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
     if x.size == 0:
         raise ValueError("Cannot interpolate: empty data.")
     idx = np.argsort(x)
@@ -95,7 +95,7 @@ def _interp1(
             return float(y[0])
         if xq >= x[-1]:
             return float(y[-1])
-        return float(np.interp(xq, x, y))
+        return np.interp(xq, x, y)
 
     # extrapolate linearly at ends
     if xq <= x[0]:
@@ -379,7 +379,7 @@ class PolarSet:
         clamp: bool = True,
     ) -> float:
         re = self.reynolds_list
-        vals = np.asarray(values, dtype=float)
+        vals = np.asarray(values, dtype=float).ravel()
         return _interp1(re, vals, float(reynolds), clamp=clamp)
 
     def coeff(
