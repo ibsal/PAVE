@@ -201,15 +201,15 @@ class VerticalTail(Wing):
             airfoil, altitude, velocity, 2.0*height,
             rootChord, midChord, tipChord, midChordPosition,
             rootSweep, midSweep, tipSweep, midSweepPosition,
-            incidence, beta, True, xqc, weight, arealDensity
+            incidence, beta, True, xqc, weight, 2.0*arealDensity
         )
         self.eta = eta
 
     def forces(self, xref, altitude, velocity, beta, n=100):
         out = super().forces(xref, altitude, velocity, beta, n=n)
-        out[0] *= 0.5 * self.eta
-        out[1] *= 0.5 * self.eta
-        out[2] *= 0.5 * self.eta
+        out[0] *= self.eta
+        out[1] *= self.eta
+        out[2] *= self.eta
         return out
 
 class Fuselage:
@@ -391,6 +391,7 @@ G = 9.80665
 
 def optimize_endurance(
     wingFoil,
+    tailFoil,
     altitude,
     batteryElectric,
     fuselages,
@@ -411,17 +412,23 @@ def optimize_endurance(
     arealDensityH = 2.0
     arealDensityV = 2.0
 
+    boomMassPerM = 0.4
+    boomMassFixed = 0.0
+    boomLengthMin = 0.05
+
     def build_aircraft(x):
+        print("Iteration +1")
         wingSpan = float(x[0])
         wingChord = float(x[1])
+        xwqc = float(x[2])
 
-        hSpan = float(x[2])
-        hChord = float(x[3])
-        xhtqc = float(x[4])
+        hSpan = float(x[3])
+        hChord = float(x[4])
+        xhtqc = float(x[5])
 
-        vHeight = float(x[5])
-        vChord = float(x[6])
-        xvtqc = float(x[7])
+        vHeight = float(x[6])
+        vChord = float(x[7])
+        xvtqc = float(x[8])
 
         mainWing = Wing(
             wingFoil, altitude, 0.0,
@@ -429,13 +436,13 @@ def optimize_endurance(
             wingChord, wingChord, wingChord, 0.5,
             0.0, 0.0, 0.0, 0.5,
             0.0, 0.0, True,
-            0.0,
+            xwqc,
             0.0,
             arealDensityMain,
         )
 
         hwing = HorizontalTail(
-            wingFoil, altitude, 0.0,
+            tailFoil, altitude, 0.0,
             hSpan,
             hChord, hChord, hChord, 0.5,
             0.0, 0.0, 0.0, 0.5,
@@ -449,7 +456,7 @@ def optimize_endurance(
         )
 
         vwing = VerticalTail(
-            wingFoil, altitude, 0.0,
+            tailFoil, altitude, 0.0,
             vHeight,
             vChord, vChord, vChord, 0.5,
             0.0, 0.0, 0.0, 0.5,
@@ -457,10 +464,32 @@ def optimize_endurance(
             xvtqc,
             0.0,
             arealDensityV,
-            eta=1.0,
+            eta=2.0,
         )
 
-        totalMass = float(baseMass) + float(mainWing.mass) + float(hwing.mass) + float(vwing.mass)
+        boomLength = max(float(xhtqc - xwqc), float(boomLengthMin))
+        boomMass = float(boomMassFixed) + float(boomMassPerM) * float(boomLength)
+        fuselages_local = []
+        for f in fuselages:
+            if isinstance(f, Fuselage) and getattr(f, "width", None) is not None and getattr(f, "height", None) is not None:
+                if float(getattr(f, "width")) <= 0.05 and float(getattr(f, "height")) <= 0.05:
+                    fnew = Fuselage(
+                        boomLength,
+                        float(f.width),
+                        float(f.height),
+                        float(f.pfactor),
+                        float(f.roughness),
+                        float(f.laminarfraction),
+                        float(getattr(f, "qfactor", 1.0)),
+                        int(getattr(f, "quantity", 1)),
+                    )
+                    fuselages_local.append(fnew)
+                else:
+                    fuselages_local.append(f)
+            else:
+                fuselages_local.append(f)
+
+        totalMass = float(baseMass) + float(mainWing.mass) + float(hwing.mass) + float(vwing.mass) + float(boomMass)
         weight = totalMass * G
 
         commsNode = Aircraft(
@@ -470,7 +499,7 @@ def optimize_endurance(
             mainWing,
             hwing,
             vwing,
-            fuselages,
+            fuselages_local,
             0.0,
             0.0,
             xcg,
@@ -483,23 +512,31 @@ def optimize_endurance(
     def objective(x):
         wingSpan = float(x[0])
         wingChord = float(x[1])
-        hSpan = float(x[2])
-        hChord = float(x[3])
-        xhtqc = float(x[4])
-        vHeight = float(x[5])
-        vChord = float(x[6])
-        xvtqc = float(x[7])
-        print("Running objective")
+        xwqc = float(x[2])
+
+        hSpan = float(x[3])
+        hChord = float(x[4])
+        xhtqc = float(x[5])
+
+        vHeight = float(x[6])
+        vChord = float(x[7])
+        xvtqc = float(x[8])
+
         if wingSpan <= 0.0 or wingChord <= 0.0 or hSpan <= 0.0 or hChord <= 0.0 or vHeight <= 0.0 or vChord <= 0.0:
+            return 1e30
+
+        if xwqc <= 0.0:
             return 1e30
 
         if xhtqc <= xcg or xvtqc <= xcg:
             return 1e30
 
+        if xhtqc <= xwqc:
+            return 1e30
+
         try:
             commsNode, totalMass = build_aircraft(x)
         except Exception:
-            print("build aircraft failed")
             return 1e30
 
         if totalMass > float(totalMassMax):
@@ -508,7 +545,6 @@ def optimize_endurance(
         try:
             vbest, pwr, thrust = commsNode.solveBestVelocity(levelFlightMargin, vguess=20.0, res=res)
         except Exception:
-            print("solve best velocity failed")
             return 1e30
 
         if not np.isfinite(pwr) or pwr <= 0.0:
@@ -519,24 +555,32 @@ def optimize_endurance(
 
         try:
             sm = float(commsNode.staticMargin())
+            cma = float(commsNode.cm_alpha())
         except Exception:
-            print("static margin failed")
             return 1e30
 
         if (sm < float(staticMarginMin)) or (sm > float(staticMarginMax)):
             return 1e30
 
+        if cma > 0:
+            return 1e30
+        
+        if pwr < bestSeen["pwr"]:
+            bestSeen["pwr"] = pwr
+            print(f"[best] eval={evalCount} pwr={pwr:.2f} W x={np.array(x, dtype=float)}")
+
         return float(pwr)
 
     bounds = [
-        (3.0, 4.5),      # wingSpan
-        (0.24, 0.60),    # wingChord
-        (0.60, 2.0),     # hSpan
-        (0.08, 0.40),    # hChord
-        (xcg + 0.2, xcg + 2.0),  # xhtqc
-        (0.20, 2.0),     # vHeight
-        (0.08, 0.40),    # vChord
-        (xcg + 0.2, xcg + 2.0),  # xvtqc
+        (3.0, 4.5),
+        (0.24, 0.40),
+        (0.05, xcg + 0.2),
+        (0.60, 1.4),
+        (0.08, 0.30),
+        (xcg + 0.2, xcg + 1.8),
+        (0.20, 1.0),
+        (0.08, 0.30),
+        (xcg + 0.2, xcg + 1.8),
     ]
 
     rng = np.random.default_rng(int(seed))
@@ -577,28 +621,31 @@ def optimize_endurance(
         "xbest": {
             "wingSpan": float(xbest[0]),
             "wingChord": float(xbest[1]),
-            "hSpan": float(xbest[2]),
-            "hChord": float(xbest[3]),
-            "xhtqc": float(xbest[4]),
-            "vHeight": float(xbest[5]),
-            "vChord": float(xbest[6]),
-            "xvtqc": float(xbest[7]),
+            "xwqc": float(xbest[2]),
+            "hSpan": float(xbest[3]),
+            "hChord": float(xbest[4]),
+            "xhtqc": float(xbest[5]),
+            "vHeight": float(xbest[6]),
+            "vChord": float(xbest[7]),
+            "xvtqc": float(xbest[8]),
+            "boomLength": float(max(float(xbest[5] - xbest[2]), float(boomLengthMin))),
         },
         "result": result,
     }
 
 
-# Example usage (adjust constants to your case)
 wingFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="psu94097")
+tailFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
 body = Fuselage(1, .3, 0.3, 0.9, 0.00635e-3, 0.3)
 booms = Fuselage(1.4, .03, 0.03, 1, 0.00635e-3, 0.05)
 batteryElectric = Powerplant(7992000, 0.59, 4000)
-print("optimizer starting")
+
 best = optimize_endurance(
-     wingFoil=wingFoil,
-     altitude=200,
+    wingFoil=wingFoil,
+    tailFoil=tailFoil,
+    altitude=200,
     batteryElectric=batteryElectric,
-    fuselages=[body, booms],
+    fuselages=[body, booms, booms],
     xcg=0.45,
     cdomisc=0.01,
     baseMass=18.0,
@@ -609,7 +656,7 @@ best = optimize_endurance(
     res=20,
     seed=1,
     maxiter=4,
-    popsize=3,
+    popsize=12,
     polish=False
 )
 print(best)
