@@ -364,7 +364,7 @@ class Aircraft:
         return (self.hwing.area * (xhtqc - self.xcg)) / (self.mwing.area * self.mwing.mac)
 
     def verticalTailVolume(self, xvtqc):
-        return (self.vtail.area * (xvtqc - self.xcg)) / (self.mwing.area * self.span)
+        return (self.vtail.area * (xvtqc - self.xcg)) / (self.mwing.area * self.mwing.span)
 
 
 '''
@@ -409,8 +409,8 @@ def optimize_endurance(
     polish=True,
 ):
     arealDensityMain = 3.0
-    arealDensityH = 2.0
-    arealDensityV = 2.0
+    arealDensityH = 1.5
+    arealDensityV = 1.5
 
     boomMassPerM = 0.4
     boomMassFixed = 0.0
@@ -431,7 +431,7 @@ def optimize_endurance(
 
         vHeight = float(x[6])
         vChord = float(x[7])
-        xvtqc = float(x[8])
+        xvtqc = xhtqc
 
         mainWing = Wing(
             wingFoil, altitude, 0.0,
@@ -525,7 +525,7 @@ def optimize_endurance(
 
         vHeight = float(x[6])
         vChord = float(x[7])
-        xvtqc = float(x[8])
+        xvtqc = xhtqc
 
         if wingSpan <= 0.0 or wingChord <= 0.0 or hSpan <= 0.0 or hChord <= 0.0 or vHeight <= 0.0 or vChord <= 0.0:
             return 1e30
@@ -543,8 +543,16 @@ def optimize_endurance(
             commsNode, totalMass = build_aircraft(x)
         except Exception:
             return 1e30
-
+        if (commsNode.horizontalTailVolume(xhtqc) < 0.3) or (commsNode.horizontalTailVolume(xhtqc) > 0.9):
+            print("Htail reject")
+            return 1e30
+        
+        if (commsNode.verticalTailVolume(xhtqc)<0.02 or commsNode.verticalTailVolume(xhtqc)>0.08):
+            print("Vtail reject")
+            return 1e30
+        
         if totalMass > float(totalMassMax):
+            print("mass reject")
             return 1e30
 
         try:
@@ -556,6 +564,7 @@ def optimize_endurance(
             return 1e30
 
         if float(pwr) > float(commsNode.pplant.pmax):
+            print("pwr reject")
             return 1e30
 
         try:
@@ -565,29 +574,34 @@ def optimize_endurance(
             return 1e30
 
         if (sm < float(staticMarginMin)) or (sm > float(staticMarginMax)):
+            print("sm reject")
             return 1e30
 
         if cma > 0:
+            print("cma reject")
             return 1e30
         
+        
+
         pwr = float(pwr)
 
         if pwr < bestSeen["pwr"]:
             bestSeen["pwr"] = pwr
             print(f"[best] eval={evalCount} pwr={pwr:.2f} W x={np.array(x, dtype=float)}")
 
+        print("Valid dp")
+
         return pwr
 
     bounds = [
         (3.0, 4.5),
-        (0.24, 0.40),
+        (0.3, 0.40),
         (0.05, xcg + 0.2),
-        (0.60, 1.4),
-        (0.08, 0.30),
+        (0.60, 1.8),
+        (0.18, 0.30),
         (xcg + 0.2, xcg + 1.8),
         (0.20, 1.0),
         (0.08, 0.30),
-        (xcg + 0.2, xcg + 1.8),
     ]
 
     rng = np.random.default_rng(int(seed))
@@ -634,7 +648,6 @@ def optimize_endurance(
             "xhtqc": float(xbest[5]),
             "vHeight": float(xbest[6]),
             "vChord": float(xbest[7]),
-            "xvtqc": float(xbest[8]),
             "boomLength": float(max(float(xbest[5] - xbest[2]), float(boomLengthMin))),
         },
         "result": result,
@@ -643,7 +656,7 @@ def optimize_endurance(
 
 wingFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="psu94097")
 tailFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
-body = Fuselage(1, .3, 0.3, 0.9, 0.00635e-3, 0.3)
+body = Fuselage(1, .3, 0.15, 0.9, 0.00635e-3, 0.3)
 booms = Fuselage(1.4, .03, 0.03, 1, 0.00635e-3, 0.05)
 batteryElectric = Powerplant(7992000, 0.59, 4000)
 
@@ -655,15 +668,15 @@ best = optimize_endurance(
     fuselages=[body, booms, booms],
     xcg=0.45,
     cdomisc=0.01,
-    baseMass=18.0,
-    totalMassMax=24.9,
+    baseMass=17.5,
+    totalMassMax=22.6796,
     staticMarginMin=0.05,
     staticMarginMax=0.30,
     levelFlightMargin=1.25,
     res=20,
-    seed=1,
-    maxiter=4,
-    popsize=12,
-    polish=False
+    seed=3,
+    maxiter=2,
+    popsize=2,
+    polish=True
 )
 print(best)
