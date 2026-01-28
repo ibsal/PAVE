@@ -367,28 +367,13 @@ class Aircraft:
         return (self.vtail.area * (xvtqc - self.xcg)) / (self.mwing.area * self.mwing.span)
 
 
-'''
-wingFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="psu94097")
-tailFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
-mainWing = Wing(wingFoil, 200, 30, 4.5, 0.3, 0.3, 0.2, 0.5, 0, 0, 0, 0.5, 0, 2, True, 0.4, 200, 3.0)
-hwing = HorizontalTail(wingFoil, 200, 30, 1.3, 0.2, 0.2, 0.1, 0.5, 0, 0, 0, 0, 0, 0, True, 1.4, 200, 2.0, elevatorDeflection=0, elevatorTau=0.35,cd_deltae_k=0)
-vwing = VerticalTail(wingFoil, 200, 30, 0.5, 0.2, 0.23, 0.2, 0.5, 10, 10, 10, 0.5, 0, 0, 1.4, 200, 2.0)
-body = Fuselage(1, .3, 0.3, 0.9, 0.00635e-3, 0.3)
-booms = Fuselage(1.4, .03, 0.03, 1, 0.00635e-3, 0.05)
-batteryElectric = Powerplant(7992000, 0.59, 4000)
-commsNode = Aircraft(200, 20, batteryElectric, mainWing, hwing, vwing, [body, booms], 0, 0, 0.5,200, 0.01)
-
-print(commsNode.solveBestVelocity(1.25))
-'''
-
-
 
 import math
 import numpy as np
 import scipy.optimize
 
 G = 9.80665
-
+''' Optimizer
 def optimize_endurance(
     wingFoil,
     tailFoil,
@@ -404,7 +389,7 @@ def optimize_endurance(
     levelFlightMargin=1.25,
     res=60,
     seed=1,
-    maxiter=30,
+    maxiter=150,
     popsize=6,
     polish=True,
 ):
@@ -673,10 +658,226 @@ best = optimize_endurance(
     staticMarginMin=0.05,
     staticMarginMax=0.30,
     levelFlightMargin=1.25,
-    res=20,
-    seed=3,
-    maxiter=2,
-    popsize=2,
+    res=2,
+    seed=6,
+    maxiter=30,
+    popsize=30,
     polish=True
 )
 print(best)
+'''
+
+# Actual design point
+
+altitude = 200
+bestDesignPoint = []
+
+wingFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="psu94097")
+tailFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
+arealDensityMain = 3.0 # kg/m^2
+arealDensityH = 2.0 # kg/m^2
+arealDensityV = 2.0 # kg/m^2
+baseMass = 17.5 # n
+boomMassFixed = 0 #n
+boomLengthMin = 0.005 #m
+cdomisc = 0.01
+xcg=0.45
+boomMassPerM = 0.4
+
+body = Fuselage(1, .3, 0.15, 0.9, 0.00635e-3, 0.3)
+booms = Fuselage(1.4, .03, 0.03, 1, 0.00635e-3, 0.05)
+batteryElectric = Powerplant(7992000, 0.59, 4000)
+fuselages = [body, booms, booms]
+
+
+def build_aircraft(x):
+    wingSpan = float(x[0])
+    wingChord = float(x[1])
+    xwqc = float(x[2])
+
+    hSpan = float(x[3])
+    hChord = float(x[4])
+    xhtqc = float(x[5])
+
+    vHeight = float(x[6])
+    vChord = float(x[7])
+    xvtqc = xhtqc
+
+    mainWing = Wing(
+        wingFoil, altitude, 0.0,
+        wingSpan,
+        wingChord, wingChord, 0.8*wingChord, 0.5,
+        0.0, 0.0, 0.0, 0.5,
+        0.0, 0.0, True,
+        xwqc,
+        0.0,
+        arealDensityMain,
+    )
+
+    hwing = HorizontalTail(
+        tailFoil, altitude, 0.0,
+        hSpan,
+        hChord, hChord, hChord, 0.5,
+        0.0, 0.0, 0.0, 0.5,
+        0.0, 0.0, True,
+        xhtqc,
+        0.0,
+        arealDensityH,
+        elevatorDeflection=0.0,
+        elevatorTau=0.35,
+        cd_deltae_k=0.0,
+    )
+
+    vwing = VerticalTail(
+        tailFoil, altitude, 0.0,
+        vHeight,
+        vChord, vChord, vChord, 0.5,
+        0.0, 0.0, 0.0, 0.5,
+        0.0, 0.0,
+        xvtqc,
+        0.0,
+        arealDensityV,
+        eta=2.0,
+    )
+
+    hwing.incidence = -0.5
+
+    boomLength = max(float(xhtqc - xwqc), float(boomLengthMin))
+    boomMass = float(boomMassFixed) + float(boomMassPerM) * float(boomLength)
+    fuselages_local = []
+    for f in fuselages:
+        if isinstance(f, Fuselage) and getattr(f, "width", None) is not None and getattr(f, "height", None) is not None:
+            if float(getattr(f, "width")) <= 0.05 and float(getattr(f, "height")) <= 0.05:
+                fnew = Fuselage(
+                    boomLength,
+                    float(f.width),
+                    float(f.height),
+                    float(f.pfactor),
+                    float(f.roughness),
+                    float(f.laminarfraction),
+                    float(getattr(f, "qfactor", 1.0)),
+                    int(getattr(f, "quantity", 1)),
+                )
+                fuselages_local.append(fnew)
+            else:
+                fuselages_local.append(f)
+        else:
+            fuselages_local.append(f)
+
+    totalMass = float(baseMass) + float(mainWing.mass) + float(hwing.mass) + float(vwing.mass) + float(boomMass)
+    weight = totalMass * G
+
+    commsNode = Aircraft(
+        altitude,
+        20.0,
+        batteryElectric,
+        mainWing,
+        hwing,
+        vwing,
+        fuselages_local,
+        0.0,
+        0.0,
+        xcg,
+        weight,
+        cdomisc,
+    )
+
+    return commsNode, totalMass
+
+design_point = [4.272, 0.306, 0.374, 0.976, 0.194, 1.574, 0.675, 0.1]
+
+def evaluate_ld_at_speed(aircraft, target_velocity):
+    saved_state = (aircraft.velocity, aircraft.aoa, aircraft.trim)
+    aircraft.velocity = float(target_velocity)
+    ld = float("nan")
+    try:
+        sol = aircraft.solveTrim()
+        if sol != [None, None]:
+            forces_off = aircraft.sumFanddM()
+            drag_off = forces_off[0]
+            lift_off = forces_off[1]
+            if drag_off:
+                ld = lift_off / drag_off
+    except Exception:
+        pass
+    finally:
+        aircraft.velocity, aircraft.aoa, aircraft.trim = saved_state
+    return ld
+
+epicairplane = build_aircraft(design_point)[0]
+vbest, pwr, thrust = epicairplane.solveBestVelocity(1.25)
+
+forces = epicairplane.sumFanddM()
+drag, lift, moment = forces[0], forces[1], forces[2]
+rho = Atmosphere(altitude).density[0]
+q = 0.5 * rho * vbest**2
+cruise_cl = lift / (q * epicairplane.mwing.area) if q > 0 else float("nan")
+moment_coefficient = (
+    moment / (q * epicairplane.mwing.area * epicairplane.mwing.mac)
+    if q > 0 and epicairplane.mwing.mac > 0
+    else float("nan")
+)
+stall_speed, clmax = epicairplane.mwing.stallSpeed(epicairplane.altitude, epicairplane.weight, v0=vbest)
+power_available = epicairplane.pplant.pmax
+propulsive_power_elec = (
+    pwr / epicairplane.pplant.neff if epicairplane.pplant.neff > 0 else float("inf")
+)
+excess_power = power_available - pwr
+power_fraction = pwr / power_available if power_available else float("nan")
+static_margin = epicairplane.staticMargin()
+cm_alpha = epicairplane.cm_alpha()
+cl_alpha = epicairplane.cl_alpha()
+h_tail_volume = epicairplane.horizontalTailVolume(design_point[5])
+v_tail_volume = epicairplane.verticalTailVolume(design_point[5])
+
+KNOTS_PER_MPS = 1.9438444924406
+LBF_PER_NEWTON = 0.2248089431
+mission_systems_power_w = 50.0
+landing_margin = 0.20
+battery_capacity_wh = 2220.0
+
+v_knots = vbest * KNOTS_PER_MPS
+stall_knots = stall_speed * KNOTS_PER_MPS
+drag_lbf = drag * LBF_PER_NEWTON
+lift_lbf = lift * LBF_PER_NEWTON
+thrust_lbf = thrust * LBF_PER_NEWTON
+propulsive_power_fraction = propulsive_power_elec / power_available if power_available else float("nan")
+total_power_w = propulsive_power_elec + mission_systems_power_w
+available_energy_wh = battery_capacity_wh * (1.0 - landing_margin)
+flight_time_h = available_energy_wh / total_power_w if total_power_w > 0.0 else 0.0
+flight_time_min = flight_time_h * 60.0
+flight_distance_nm = flight_time_h * v_knots
+flight_distance_km = flight_distance_nm * 1.852
+climb_rate_mps = excess_power / epicairplane.weight
+FT_PER_MIN_PER_MPS = 196.850394
+climb_rate_fpm = climb_rate_mps * FT_PER_MIN_PER_MPS
+ld_at_90 = evaluate_ld_at_speed(epicairplane, vbest * 0.9)
+ld_at_110 = evaluate_ld_at_speed(epicairplane, vbest * 1.1)
+
+print("Cruise summary:")
+print(f"  Velocity: {vbest:.2f} m/s / {v_knots:.1f} kt")
+print(f"  Stall speed: {stall_speed:.2f} m/s / {stall_knots:.1f} kt, Cl_max: {clmax:.3f}")
+print(f"  AoA: {epicairplane.aoa:.3f} deg, Trim: {epicairplane.trim:.3f} deg")
+print(f"  Lift: {lift:.2f} N ({lift_lbf:.1f} lbf), Drag: {drag:.2f} N ({drag_lbf:.1f} lbf), L/D: {lift/drag if drag else float('nan'):.3f}")
+print(f"  Thrust: {thrust:.2f} N ({thrust_lbf:.1f} lbf)")
+print(f"  Cruise Cl: {cruise_cl:.3f}")
+print("Performance & climb:")
+print(f"  Power required: {pwr:.2f} W, Propulsive electrical draw: {propulsive_power_elec:.2f} W ({epicairplane.pplant.neff:.3f} efficiency)")
+print(f"  Power available: {power_available:.2f} W, Excess power: {excess_power:.2f} W")
+print(f"  Power fraction (required / available): {power_fraction:.3f}")
+print(f"  Power fraction (propulsive electrical / available): {propulsive_power_fraction:.3f}")
+print(f"  Climb/sink rate from excess power: {climb_rate_mps:.2f} m/s ({climb_rate_fpm:.0f} ft/min)")
+print(f"  Mission systems power: {mission_systems_power_w:.1f} W, Landing margin: {landing_margin*100:.0f}%")
+print("Off-design L/D:")
+print(f"  90% cruise ({0.9*vbest:.2f} m/s): {ld_at_90:.3f}")
+print(f"  110% cruise ({1.1*vbest:.2f} m/s): {ld_at_110:.3f}")
+print(f"Endurance:")
+print(f"  Power including mission systems: {total_power_w:.2f} W")
+print(f"  Battery energy payload: {available_energy_wh:.1f} Wh (from {battery_capacity_wh:.0f} Wh capacity)")
+print(f"  Flight time: {flight_time_h:.2f} h ({flight_time_min:.0f} min)")
+print(f"  Range: {flight_distance_nm:.1f} nm ({flight_distance_km:.1f} km)")
+print("Stability:")
+print(f"  Static margin: {static_margin:.3f}, Cm_alpha: {cm_alpha:.3f}, Cl_alpha: {cl_alpha:.3f}")
+print(f"  Horizontal tail volume: {h_tail_volume:.3f}, Vertical tail volume: {v_tail_volume:.3f}")
+print(f"  Moment coefficient (cruise): {moment_coefficient:.4f}")
+
