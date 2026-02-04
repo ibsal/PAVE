@@ -3,6 +3,10 @@ from PyFoil.airfoil_polars import PolarSet
 import math
 import scipy.optimize
 import numpy as np
+import matplotlib.pyplot as plt
+import os
+import pickle
+import hashlib
 
 # Helper functions
 
@@ -684,7 +688,7 @@ cdomisc = 0.01
 xcg=0.45
 boomMassPerM = 0.4
 
-body = Fuselage(1, .3, 0.15, 0.9, 0.00635e-3, 0.3)
+body = Fuselage(1.0541, 0.3048, 0.21336, 0.9, 0.00635e-3, 0.3)
 booms = Fuselage(1.4, .03, 0.03, 1, 0.00635e-3, 0.05)
 batteryElectric = Powerplant(7992000, 0.59, 4000)
 fuselages = [body, booms, booms]
@@ -730,9 +734,9 @@ def build_aircraft(x):
 
     vwing = VerticalTail(
         tailFoil, altitude, 0.0,
-        vHeight,
-        vChord, vChord, vChord, 0.5,
-        0.0, 0.0, 0.0, 0.5,
+        14.7*0.0254*0.5,
+        5.4*0.0254, 9.6*0.0254, 5.4*0.0254, 0.8,
+        30, 0.0, -30, 0.8,
         0.0, 0.0,
         xvtqc,
         0.0,
@@ -740,7 +744,8 @@ def build_aircraft(x):
         eta=2.0,
     )
 
-    hwing.incidence = -0.5
+    hwing.incidence = 0
+    mainWing.incidence = 1.0
 
     boomLength = max(float(xhtqc - xwqc), float(boomLengthMin))
     boomMass = float(boomMassFixed) + float(boomMassPerM) * float(boomLength)
@@ -784,7 +789,61 @@ def build_aircraft(x):
 
     return commsNode, totalMass
 
-design_point = [4.272, 0.306, 0.374, 0.976, 0.194, 1.574, 0.675, 0.1]
+design_point = [4.272, 0.306, 0.374, 0.976, 0.194, 1.574, 0.34798, 0.194]
+cache_version = 1
+cache_path = "aircraft_cache.pkl"
+
+def cache_key():
+    fuselage_sig = []
+    for f in fuselages:
+        fuselage_sig.append((
+            float(getattr(f, "length", 0.0)),
+            float(getattr(f, "width", 0.0)),
+            float(getattr(f, "height", 0.0)),
+            float(getattr(f, "pfactor", 0.0)),
+            float(getattr(f, "roughness", 0.0)),
+            float(getattr(f, "laminarfraction", 0.0)),
+            float(getattr(f, "qfactor", 1.0)),
+            int(getattr(f, "quantity", 1)),
+        ))
+    key_data = {
+        "version": cache_version,
+        "design_point": [float(x) for x in design_point],
+        "altitude": float(altitude),
+        "xcg": float(xcg),
+        "cdomisc": float(cdomisc),
+        "baseMass": float(baseMass),
+        "arealDensityMain": float(arealDensityMain),
+        "arealDensityH": float(arealDensityH),
+        "arealDensityV": float(arealDensityV),
+        "boomMassFixed": float(boomMassFixed),
+        "boomLengthMin": float(boomLengthMin),
+        "boomMassPerM": float(boomMassPerM),
+        "fuselages": fuselage_sig,
+        "battery": (float(batteryElectric.full), float(batteryElectric.neff), float(batteryElectric.pmax)),
+        "wingFoil": "psu94097",
+        "tailFoil": "S9033",
+    }
+    return hashlib.sha256(repr(key_data).encode("utf-8")).hexdigest()
+
+def load_cached_aircraft():
+    if not os.path.exists(cache_path):
+        return None
+    try:
+        with open(cache_path, "rb") as f:
+            payload = pickle.load(f)
+        if payload.get("key") != cache_key():
+            return None
+        return payload
+    except Exception:
+        return None
+
+def save_cached_aircraft(payload):
+    try:
+        with open(cache_path, "wb") as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass
 
 def evaluate_ld_at_speed(aircraft, target_velocity):
     saved_state = (aircraft.velocity, aircraft.aoa, aircraft.trim)
@@ -804,8 +863,56 @@ def evaluate_ld_at_speed(aircraft, target_velocity):
         aircraft.velocity, aircraft.aoa, aircraft.trim = saved_state
     return ld
 
-epicairplane = build_aircraft(design_point)[0]
-vbest, pwr, thrust = epicairplane.solveBestVelocity(1.25)
+def drag_polar_at_speed(aircraft, speed, aoa_samples, trim_guess=0.0):
+    saved_state = (aircraft.velocity, aircraft.aoa, aircraft.trim)
+    aircraft.velocity = float(speed)
+    results = []
+    for aoa in aoa_samples:
+        aircraft.aoa = float(aoa)
+        def moment_sq(t):
+            aircraft.trim = float(t)
+            m = aircraft.sumFanddM()[2]
+            return m * m
+        try:
+            res = scipy.optimize.minimize_scalar(
+                moment_sq,
+                bounds=(-10.0, 10.0),
+                method="bounded",
+                options={"xatol": 0.05},
+            )
+            aircraft.trim = float(res.x)
+            forces = aircraft.sumFanddM()
+            results.append((float(aoa), float(aircraft.trim), float(forces[0]), float(forces[1])))
+        except Exception:
+            results.append((float(aoa), float("nan"), float("nan"), float("nan")))
+    aircraft.velocity, aircraft.aoa, aircraft.trim = saved_state
+    return results
+
+cached = None
+if cached is None:
+    epicairplane = build_aircraft(design_point)[0]
+    vbest, pwr, thrust = epicairplane.solveBestVelocity(1.25)
+    cached = {
+        "key": cache_key(),
+        "aircraft": epicairplane,
+        "vbest": float(vbest),
+        "pwr": float(pwr),
+        "thrust": float(thrust),
+        "aoa": float(epicairplane.aoa),
+        "trim": float(epicairplane.trim),
+    }
+    save_cached_aircraft(cached)
+else:
+    epicairplane = cached["aircraft"]
+    vbest = float(cached.get("vbest", epicairplane.velocity))
+    pwr = float(cached.get("pwr", 0.0))
+    thrust = float(cached.get("thrust", 0.0))
+    epicairplane.velocity = vbest
+    if "aoa" in cached and "trim" in cached:
+        epicairplane.aoa = float(cached["aoa"])
+        epicairplane.trim = float(cached["trim"])
+    else:
+        epicairplane.solveTrim()
 
 forces = epicairplane.sumFanddM()
 drag, lift, moment = forces[0], forces[1], forces[2]
@@ -832,6 +939,11 @@ v_tail_volume = epicairplane.verticalTailVolume(design_point[5])
 
 KNOTS_PER_MPS = 1.9438444924406
 LBF_PER_NEWTON = 0.2248089431
+IN_PER_M = 39.37007874015748
+LB_PER_KG = 2.2046226218487757
+IN2_PER_M2 = IN_PER_M * IN_PER_M
+LB_PER_IN2_PER_KG_PER_M2 = LB_PER_KG / IN2_PER_M2
+MI_PER_NM = 1.1507794480235425
 mission_systems_power_w = 50.0
 landing_margin = 0.20
 battery_capacity_wh = 2220.0
@@ -847,7 +959,7 @@ available_energy_wh = battery_capacity_wh * (1.0 - landing_margin)
 flight_time_h = available_energy_wh / total_power_w if total_power_w > 0.0 else 0.0
 flight_time_min = flight_time_h * 60.0
 flight_distance_nm = flight_time_h * v_knots
-flight_distance_km = flight_distance_nm * 1.852
+flight_distance_mi = flight_distance_nm * MI_PER_NM
 climb_rate_mps = excess_power / epicairplane.weight
 FT_PER_MIN_PER_MPS = 196.850394
 climb_rate_fpm = climb_rate_mps * FT_PER_MIN_PER_MPS
@@ -855,29 +967,188 @@ ld_at_90 = evaluate_ld_at_speed(epicairplane, vbest * 0.9)
 ld_at_110 = evaluate_ld_at_speed(epicairplane, vbest * 1.1)
 
 print("Cruise summary:")
-print(f"  Velocity: {vbest:.2f} m/s / {v_knots:.1f} kt")
-print(f"  Stall speed: {stall_speed:.2f} m/s / {stall_knots:.1f} kt, Cl_max: {clmax:.3f}")
+print(f"  Velocity: {v_knots:.1f} kt")
+print(f"  Stall speed: {stall_knots:.1f} kt, Cl_max: {clmax:.3f}")
 print(f"  AoA: {epicairplane.aoa:.3f} deg, Trim: {epicairplane.trim:.3f} deg")
-print(f"  Lift: {lift:.2f} N ({lift_lbf:.1f} lbf), Drag: {drag:.2f} N ({drag_lbf:.1f} lbf), L/D: {lift/drag if drag else float('nan'):.3f}")
-print(f"  Thrust: {thrust:.2f} N ({thrust_lbf:.1f} lbf)")
+print(f"  Lift: {lift_lbf:.1f} lbf, Drag: {drag_lbf:.1f} lbf, L/D: {lift/drag if drag else float('nan'):.3f}")
+print(f"  Thrust: {thrust_lbf:.1f} lbf")
 print(f"  Cruise Cl: {cruise_cl:.3f}")
 print("Performance & climb:")
 print(f"  Power required: {pwr:.2f} W, Propulsive electrical draw: {propulsive_power_elec:.2f} W ({epicairplane.pplant.neff:.3f} efficiency)")
 print(f"  Power available: {power_available:.2f} W, Excess power: {excess_power:.2f} W")
 print(f"  Power fraction (required / available): {power_fraction:.3f}")
 print(f"  Power fraction (propulsive electrical / available): {propulsive_power_fraction:.3f}")
-print(f"  Climb/sink rate from excess power: {climb_rate_mps:.2f} m/s ({climb_rate_fpm:.0f} ft/min)")
+print(f"  Climb/sink rate from excess power: {climb_rate_fpm:.0f} ft/min")
 print(f"  Mission systems power: {mission_systems_power_w:.1f} W, Landing margin: {landing_margin*100:.0f}%")
 print("Off-design L/D:")
-print(f"  90% cruise ({0.9*vbest:.2f} m/s): {ld_at_90:.3f}")
-print(f"  110% cruise ({1.1*vbest:.2f} m/s): {ld_at_110:.3f}")
+print(f"  90% cruise ({0.9*v_knots:.1f} kt): {ld_at_90:.3f}")
+print(f"  110% cruise ({1.1*v_knots:.1f} kt): {ld_at_110:.3f}")
 print(f"Endurance:")
 print(f"  Power including mission systems: {total_power_w:.2f} W")
 print(f"  Battery energy payload: {available_energy_wh:.1f} Wh (from {battery_capacity_wh:.0f} Wh capacity)")
 print(f"  Flight time: {flight_time_h:.2f} h ({flight_time_min:.0f} min)")
-print(f"  Range: {flight_distance_nm:.1f} nm ({flight_distance_km:.1f} km)")
+print(f"  Range: {flight_distance_nm:.1f} nm ({flight_distance_mi:.1f} mi)")
 print("Stability:")
 print(f"  Static margin: {static_margin:.3f}, Cm_alpha: {cm_alpha:.3f}, Cl_alpha: {cl_alpha:.3f}")
 print(f"  Horizontal tail volume: {h_tail_volume:.3f}, Vertical tail volume: {v_tail_volume:.3f}")
 print(f"  Moment coefficient (cruise): {moment_coefficient:.4f}")
+
+print("Design parameters:")
+print(f"  CG x-position: {epicairplane.xcg * IN_PER_M:.3f} in")
+mw = epicairplane.mwing
+print("Main wing:")
+print(f"  Span: {mw.span * IN_PER_M:.3f} in, Area: {mw.area * IN2_PER_M2:.3f} in^2, AR: {mw.ar:.3f}, MAC: {mw.mac * IN_PER_M:.3f} in, Taper: {mw.taper:.3f}")
+print(f"  Chords (root/mid/tip): {mw.rootChord * IN_PER_M:.3f} / {mw.midChord * IN_PER_M:.3f} / {mw.tipChord * IN_PER_M:.3f} in, Mid-chord position: {mw.midChordPosition * IN_PER_M:.3f} in")
+print(f"  Sweeps (root/mid/tip): {mw.rootSweep:.3f} / {mw.midSweep:.3f} / {mw.tipSweep:.3f} deg, Mid-sweep position: {mw.midSweepPosition:.3f}")
+print(f"  Incidence: {mw.incidence:.3f} deg, xqc: {mw.xqc * IN_PER_M:.3f} in, Symmetric: {mw.symmetric}, Areal density: {mw.arealDensity * LB_PER_IN2_PER_KG_PER_M2:.3f} lb/in^2")
+print(f"  Mass: {mw.mass * LB_PER_KG:.3f} lb, Oswald e: {mw.e_oswald_w:.3f}")
+
+hw = epicairplane.hwing
+if hw is not None:
+    print("Horizontal tail:")
+    print(f"  Span: {hw.span * IN_PER_M:.3f} in, Area: {hw.area * IN2_PER_M2:.3f} in^2, AR: {hw.ar:.3f}, MAC: {hw.mac * IN_PER_M:.3f} in, Taper: {hw.taper:.3f}")
+    print(f"  Chords (root/mid/tip): {hw.rootChord * IN_PER_M:.3f} / {hw.midChord * IN_PER_M:.3f} / {hw.tipChord * IN_PER_M:.3f} in, Mid-chord position: {hw.midChordPosition * IN_PER_M:.3f} in")
+    print(f"  Sweeps (root/mid/tip): {hw.rootSweep:.3f} / {hw.midSweep:.3f} / {hw.tipSweep:.3f} deg, Mid-sweep position: {hw.midSweepPosition:.3f}")
+    print(f"  Incidence: {hw.incidence:.3f} deg, xqc: {hw.xqc * IN_PER_M:.3f} in, Symmetric: {hw.symmetric}, Areal density: {hw.arealDensity * LB_PER_IN2_PER_KG_PER_M2:.3f} lb/in^2")
+    print(f"  Mass: {hw.mass * LB_PER_KG:.3f} lb, Oswald e: {hw.e_oswald_w:.3f}")
+    print(f"  Elevator deflection: {hw.elevatorDeflection:.3f} deg, Elevator tau: {hw.elevatorTau:.3f}, CD delta-e k: {hw.cd_deltae_k:.3f}")
+
+vw = epicairplane.vtail
+if vw is not None:
+    v_height = vw.span * 0.5
+    print("Vertical tail:")
+    print(f"  Height: {v_height * IN_PER_M:.3f} in, Span: {vw.span * IN_PER_M:.3f} in, Area: {vw.area * IN2_PER_M2:.3f} in^2, AR: {vw.ar:.3f}, MAC: {vw.mac * IN_PER_M:.3f} in, Taper: {vw.taper:.3f}")
+    print(f"  Chords (root/mid/tip): {vw.rootChord * IN_PER_M:.3f} / {vw.midChord * IN_PER_M:.3f} / {vw.tipChord * IN_PER_M:.3f} in, Mid-chord position: {vw.midChordPosition * IN_PER_M:.3f} in")
+    print(f"  Sweeps (root/mid/tip): {vw.rootSweep:.3f} / {vw.midSweep:.3f} / {vw.tipSweep:.3f} deg, Mid-sweep position: {vw.midSweepPosition:.3f}")
+    print(f"  Incidence: {vw.incidence:.3f} deg, xqc: {vw.xqc * IN_PER_M:.3f} in, Symmetric: {vw.symmetric}, Areal density: {vw.arealDensity * LB_PER_IN2_PER_KG_PER_M2:.3f} lb/in^2")
+    print(f"  Mass: {vw.mass * LB_PER_KG:.3f} lb, Oswald e: {vw.e_oswald_w:.3f}, Eta: {vw.eta:.3f}")
+
+print("Fuselages:")
+for i, f in enumerate(epicairplane.fuselages, 1):
+    print(
+        f"  {i}: Length {f.length * IN_PER_M:.3f} in, Width {f.width * IN_PER_M:.3f} in, Height {f.height * IN_PER_M:.3f} in, "
+        f"P-factor {f.pfactor:.3f}, Roughness {f.roughness:.6g}, Laminar frac {f.laminarfraction:.3f}, "
+        f"Q-factor {f.qfactor:.3f}, Quantity {f.quantity}"
+    )
+
+
+plotPolar = False
+if plotPolar:
+    aoa_samples = [epicairplane.aoa + d for d in (-16.0, -14.0, -12.0,-10.0,-8.0, -7.0, -6.0, -5.0, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0)]
+    polar_rows = drag_polar_at_speed(epicairplane, vbest, aoa_samples, trim_guess=epicairplane.trim)
+    print("Drag polar (trimmed for zero moment, fixed cruise speed):")
+    print("  AoA(deg)  Trim(deg)     CL      CD")
+    for aoa, trim, drag_p, lift_p in polar_rows:
+        cl = lift_p / (q * epicairplane.mwing.area) if q > 0 else float("nan")
+        cd = drag_p / (q * epicairplane.mwing.area) if q > 0 else float("nan")
+        print(f"  {aoa:7.2f}  {trim:9.2f}  {cl:6.3f}  {cd:6.4f}")
+
+    cds = []
+    cls = []
+    for aoa, trim, drag_p, lift_p in polar_rows:
+        cl = lift_p / (q * epicairplane.mwing.area) if q > 0 else float("nan")
+        cd = drag_p / (q * epicairplane.mwing.area) if q > 0 else float("nan")
+        if np.isfinite(cl) and np.isfinite(cd):
+            cds.append(cd)
+            cls.append(cl)
+
+    wing_cds = []
+    wing_cls = []
+    for aoa in aoa_samples:
+        wforces = epicairplane.mwing.forces(epicairplane.xcg, epicairplane.altitude, vbest, aoa)
+        wdrag = wforces[0]
+        wlift = wforces[1]
+        wcl = wlift / (q * epicairplane.mwing.area) if q > 0 else float("nan")
+        wcd = wdrag / (q * epicairplane.mwing.area) if q > 0 else float("nan")
+        if np.isfinite(wcl) and np.isfinite(wcd):
+            wing_cds.append(wcd)
+            wing_cls.append(wcl)
+
+    if cds and cls:
+        plt.figure(figsize=(6, 4))
+        plt.plot(cds, cls, marker="o", label="Aircraft (trimmed)")
+        if wing_cds and wing_cls:
+            plt.plot(wing_cds, wing_cls, marker="s", label="Wing only")
+        plt.xlabel("CD")
+        plt.ylabel("CL")
+        plt.title("Drag Polar at Cruise Speed")
+        plt.grid(True, linestyle="--", alpha=0.6)
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+    ld_vals = []
+    aoa_vals = []
+    for aoa, trim, drag_p, lift_p in polar_rows:
+        if drag_p:
+            ld = lift_p / drag_p
+        else:
+            ld = float("nan")
+        if np.isfinite(ld):
+            aoa_vals.append(aoa)
+            ld_vals.append(ld)
+
+    if aoa_vals and ld_vals:
+        plt.figure(figsize=(6, 4))
+        plt.plot(aoa_vals, ld_vals, marker="o")
+        plt.xlabel("AoA (deg)")
+        plt.ylabel("L/D")
+        plt.title("L/D vs AoA at Cruise Speed")
+        plt.grid(True, linestyle="--", alpha=0.6)
+        plt.tight_layout()
+        plt.show()
+
+    def trim_and_power_at_speed(aircraft, speed):
+        saved_state = (aircraft.velocity, aircraft.aoa, aircraft.trim)
+        aircraft.velocity = float(speed)
+        trim = float("nan")
+        pwr_req = float("nan")
+        try:
+            sol = aircraft.solveTrim()
+            if sol != [None, None]:
+                forces = aircraft.sumFanddM()
+                drag_here = forces[0]
+                trim = float(aircraft.trim)
+                pwr_req = float(drag_here) * float(aircraft.velocity)
+        except Exception:
+            pass
+        finally:
+            aircraft.velocity, aircraft.aoa, aircraft.trim = saved_state
+        return trim, pwr_req
+
+    min_speed = max(stall_speed * 1.05, 1.0)
+    max_speed = max(vbest * 1.6, min_speed + 1.0)
+    speed_samples = np.linspace(min_speed, max_speed, 20)
+
+    speed_knots = []
+    trim_vals = []
+    power_vals = []
+    for v in speed_samples:
+        trim, pwr_req = trim_and_power_at_speed(epicairplane, v)
+        if np.isfinite(trim) and np.isfinite(pwr_req):
+            speed_knots.append(v * KNOTS_PER_MPS)
+            trim_vals.append(trim)
+            power_vals.append(pwr_req)
+
+    if speed_knots and power_vals:
+        plt.figure(figsize=(6, 4))
+        plt.plot(speed_knots, power_vals, marker="o", label="Power required")
+        plt.axhline(power_available, color="r", linestyle="--", label="Power available")
+        plt.xlabel("Airspeed (kt)")
+        plt.ylabel("Power (W)")
+        plt.title("Power Required vs Airspeed")
+        plt.grid(True, linestyle="--", alpha=0.6)
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+    if speed_knots and trim_vals:
+        plt.figure(figsize=(6, 4))
+        plt.plot(speed_knots, trim_vals, marker="o")
+        plt.xlabel("Airspeed (kt)")
+        plt.ylabel("Trim (deg)")
+        plt.title("Trim vs Airspeed")
+        plt.grid(True, linestyle="--", alpha=0.6)
+        plt.tight_layout()
+        plt.show()
 
