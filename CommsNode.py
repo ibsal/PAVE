@@ -676,7 +676,7 @@ print(best)
 altitude = 200
 bestDesignPoint = []
 
-wingFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="psu94097")
+wingFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="dae11")
 tailFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
 arealDensityMain = 3.0 # kg/m^2
 arealDensityH = 2.0 # kg/m^2
@@ -1032,123 +1032,135 @@ for i, f in enumerate(epicairplane.fuselages, 1):
     )
 
 
-plotPolar = False
-if plotPolar:
-    aoa_samples = [epicairplane.aoa + d for d in (-16.0, -14.0, -12.0,-10.0,-8.0, -7.0, -6.0, -5.0, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0)]
-    polar_rows = drag_polar_at_speed(epicairplane, vbest, aoa_samples, trim_guess=epicairplane.trim)
-    print("Drag polar (trimmed for zero moment, fixed cruise speed):")
-    print("  AoA(deg)  Trim(deg)     CL      CD")
-    for aoa, trim, drag_p, lift_p in polar_rows:
-        cl = lift_p / (q * epicairplane.mwing.area) if q > 0 else float("nan")
-        cd = drag_p / (q * epicairplane.mwing.area) if q > 0 else float("nan")
-        print(f"  {aoa:7.2f}  {trim:9.2f}  {cl:6.3f}  {cd:6.4f}")
 
-    cds = []
-    cls = []
-    for aoa, trim, drag_p, lift_p in polar_rows:
-        cl = lift_p / (q * epicairplane.mwing.area) if q > 0 else float("nan")
-        cd = drag_p / (q * epicairplane.mwing.area) if q > 0 else float("nan")
-        if np.isfinite(cl) and np.isfinite(cd):
-            cds.append(cd)
-            cls.append(cl)
+# calculate system CER
+AFcer = 150 * 6
+MOTORcer = 250 * 1.5
+FUELcer = 100 * 16
+SensorCER = 250 * 0.02
+Gccer = 200 * flight_time_h * 3
+SysCER = AFcer + MOTORcer + FUELcer + SensorCER + Gccer
+# TPMS
+TPMcret = min(1, (flight_time_h - 3)/(3))
 
-    wing_cds = []
-    wing_cls = []
-    for aoa in aoa_samples:
-        wforces = epicairplane.mwing.forces(epicairplane.xcg, epicairplane.altitude, vbest, aoa)
-        wdrag = wforces[0]
-        wlift = wforces[1]
-        wcl = wlift / (q * epicairplane.mwing.area) if q > 0 else float("nan")
-        wcd = wdrag / (q * epicairplane.mwing.area) if q > 0 else float("nan")
-        if np.isfinite(wcl) and np.isfinite(wcd):
-            wing_cds.append(wcd)
-            wing_cls.append(wcl)
 
-    if cds and cls:
-        plt.figure(figsize=(6, 4))
-        plt.plot(cds, cls, marker="o", label="Aircraft (trimmed)")
-        if wing_cds and wing_cls:
-            plt.plot(wing_cds, wing_cls, marker="s", label="Wing only")
-        plt.xlabel("CD")
-        plt.ylabel("CL")
-        plt.title("Drag Polar at Cruise Speed")
-        plt.grid(True, linestyle="--", alpha=0.6)
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
+# SE
+SE = (0.34 * TPMcret)/(SysCER/1000)
+print("SE score:", SE)
+print("TMPEcret:", TPMcret)
+print("SysCER:", SysCER)
 
-    ld_vals = []
-    aoa_vals = []
-    for aoa, trim, drag_p, lift_p in polar_rows:
-        if drag_p:
-            ld = lift_p / drag_p
-        else:
-            ld = float("nan")
-        if np.isfinite(ld):
-            aoa_vals.append(aoa)
-            ld_vals.append(ld)
+# simple Mission Envelope
+bankAngle = 20 # degrees
+velopt = v_knots * 0.514444 # m/s velocity at optimal cruise
+velstallopt = stall_knots*0.514444 # m/s stall at optimal straight cruise
+load_factor = 1/math.cos(math.radians(bankAngle))
+bank_stall = velstallopt * math.sqrt(load_factor)
+bank_vopt = velopt * math.sqrt(load_factor)
+newpmin = pwr * math.pow(load_factor, 1.5)
+truereq = (newpmin/epicairplane.pplant.neff) + mission_systems_power_w
+newEndurance = (total_power_w/truereq) * flight_time_h
+print(newEndurance)
+print(bank_vopt/0.514444)
 
-    if aoa_vals and ld_vals:
-        plt.figure(figsize=(6, 4))
-        plt.plot(aoa_vals, ld_vals, marker="o")
-        plt.xlabel("AoA (deg)")
-        plt.ylabel("L/D")
-        plt.title("L/D vs AoA at Cruise Speed")
-        plt.grid(True, linestyle="--", alpha=0.6)
-        plt.tight_layout()
-        plt.show()
+import math
+import numpy as np
+import matplotlib.pyplot as plt
 
-    def trim_and_power_at_speed(aircraft, speed):
-        saved_state = (aircraft.velocity, aircraft.aoa, aircraft.trim)
-        aircraft.velocity = float(speed)
-        trim = float("nan")
-        pwr_req = float("nan")
-        try:
-            sol = aircraft.solveTrim()
-            if sol != [None, None]:
-                forces = aircraft.sumFanddM()
-                drag_here = forces[0]
-                trim = float(aircraft.trim)
-                pwr_req = float(drag_here) * float(aircraft.velocity)
-        except Exception:
-            pass
-        finally:
-            aircraft.velocity, aircraft.aoa, aircraft.trim = saved_state
-        return trim, pwr_req
+# --- Constants ---
+KNOT_TO_MPS = 0.514444
+MPS_TO_KNOT = 1.0 / KNOT_TO_MPS
+G = 9.80665  # m/s^2
+M_TO_FT = 3.28084
 
-    min_speed = max(stall_speed * 1.05, 1.0)
-    max_speed = max(vbest * 1.6, min_speed + 1.0)
-    speed_samples = np.linspace(min_speed, max_speed, 20)
+# --- Baseline (straight & level) in m/s ---
+velopt0_mps    = v_knots * KNOT_TO_MPS
+velstall0_mps  = stall_knots * KNOT_TO_MPS
 
-    speed_knots = []
-    trim_vals = []
-    power_vals = []
-    for v in speed_samples:
-        trim, pwr_req = trim_and_power_at_speed(epicairplane, v)
-        if np.isfinite(trim) and np.isfinite(pwr_req):
-            speed_knots.append(v * KNOTS_PER_MPS)
-            trim_vals.append(trim)
-            power_vals.append(pwr_req)
+# --- Sweep bank angle ---
+bank_angles_deg = np.linspace(0.0, 60.0, 241)  # 0 to 60 deg, 0.25-deg step
+phi_rad = np.deg2rad(bank_angles_deg)
 
-    if speed_knots and power_vals:
-        plt.figure(figsize=(6, 4))
-        plt.plot(speed_knots, power_vals, marker="o", label="Power required")
-        plt.axhline(power_available, color="r", linestyle="--", label="Power available")
-        plt.xlabel("Airspeed (kt)")
-        plt.ylabel("Power (W)")
-        plt.title("Power Required vs Airspeed")
-        plt.grid(True, linestyle="--", alpha=0.6)
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
+load_factor = 1.0 / np.cos(phi_rad)                 # n = 1/cos(phi)
+sqrt_n = np.sqrt(load_factor)
 
-    if speed_knots and trim_vals:
-        plt.figure(figsize=(6, 4))
-        plt.plot(speed_knots, trim_vals, marker="o")
-        plt.xlabel("Airspeed (kt)")
-        plt.ylabel("Trim (deg)")
-        plt.title("Trim vs Airspeed")
-        plt.grid(True, linestyle="--", alpha=0.6)
-        plt.tight_layout()
-        plt.show()
+# --- Speeds in bank ---
+bank_vopt_mps  = velopt0_mps * sqrt_n
+bank_stall_mps = velstall0_mps * sqrt_n
 
+# --- Power scaling (assuming pwr is straight-level P_min at Vopt0) ---
+newpmin_w = pwr * (load_factor ** 1.5)
+
+# Total power draw (input power) including mission systems
+truereq_w = (newpmin_w / epicairplane.pplant.neff) + mission_systems_power_w
+
+# --- Endurance scaling ---
+# Option A (your original form): assumes total_power_w is the *baseline draw power* that produced flight_time_h
+endurance_h = flight_time_h * (total_power_w / truereq_w)
+
+# --- Turn radii ---
+tan_phi = np.tan(phi_rad)
+eps = 1e-12
+
+radius_vopt_m = np.where(np.abs(tan_phi) > eps, (bank_vopt_mps ** 2) / (G * tan_phi), np.inf)
+
+stall_margin = 1.25
+bank_vstall_margin_mps = bank_stall_mps * stall_margin
+radius_vstall_margin_m = np.where(np.abs(tan_phi) > eps, (bank_vstall_margin_mps ** 2) / (G * tan_phi), np.inf)
+
+# Convert to ft
+radius_vopt_ft = radius_vopt_m * M_TO_FT
+radius_vstall_margin_ft = radius_vstall_margin_m * M_TO_FT
+
+# Crop "crazy" values (near-zero bank -> inf radius) and cap to plot max
+phi_min_deg = 2.0
+cap_ft = 300.0
+
+mask = bank_angles_deg >= phi_min_deg
+
+radius_vopt_ft_plot = radius_vopt_ft.astype(float).copy()
+radius_vstall_margin_ft_plot = radius_vstall_margin_ft.astype(float).copy()
+
+for r in (radius_vopt_ft_plot, radius_vstall_margin_ft_plot):
+    r[~np.isfinite(r)] = np.nan
+    r[~mask] = np.nan
+    r[r > cap_ft] = np.nan
+
+# =========================
+# Plot 1: Endurance vs bank
+# =========================
+plt.figure()
+plt.plot(bank_angles_deg, endurance_h, label="Endurance (using total_power_w)")
+plt.xlabel("Bank angle (deg)")
+plt.ylabel("Endurance (hours)")
+plt.title("Endurance vs Bank Angle")
+plt.grid(True)
+plt.legend()
+plt.show()
+
+# ======================
+# Plot 2: Vopt vs bank
+# ======================
+plt.figure()
+plt.plot(bank_angles_deg, bank_vopt_mps * MPS_TO_KNOT, label="Vopt (bank)")
+plt.plot(bank_angles_deg, bank_stall_mps * MPS_TO_KNOT, label="Vstall (bank)")
+plt.xlabel("Bank angle (deg)")
+plt.ylabel("Speed (knots)")
+plt.title("Optimal & Stall Speed vs Bank Angle")
+plt.grid(True)
+plt.legend()
+plt.show()
+
+# ============================
+# Plot 3: Orbit radius vs bank (ft) + overlay + cropped
+# ============================
+plt.figure()
+plt.plot(bank_angles_deg, radius_vopt_ft_plot, label="Radius @ Vopt(bank)")
+plt.plot(bank_angles_deg, radius_vstall_margin_ft_plot, linestyle="--", label=f"Radius @ {stall_margin:.2f}*Vstall(bank)")
+plt.xlabel("Bank angle (deg)")
+plt.ylabel("Turn radius (ft)")
+plt.title("Orbit Radius vs Bank Angle (ft)")
+plt.grid(True)
+plt.ylim(0, cap_ft)
+plt.legend()
+plt.show()

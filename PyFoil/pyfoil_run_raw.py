@@ -307,7 +307,11 @@ def build_extension_segments(last_alpha: float, alpha_max: float) -> List[Tuple[
 def main() -> None:
     ap = argparse.ArgumentParser()
 
-    ap.add_argument("--xfoil", required=True, help="Path to xfoil executable (or 'xfoil' if on PATH)")
+    ap.add_argument(
+        "--xfoil",
+        default="xfoil.exe" if os.name == "nt" else "xfoil",
+        help="Path to xfoil executable (defaults to local xfoil.exe / xfoil)",
+    )
     ap.add_argument("--airfoils", required=True, help="Folder containing .dat airfoil files")
     ap.add_argument("--out", required=True, help="Output folder for polar files")
 
@@ -327,6 +331,11 @@ def main() -> None:
 
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument(
+        "--starts-with",
+        default=None,
+        help="Only process .dat files whose basename starts with this letter/prefix (case-insensitive).",
+    )
 
     # Base sweep (fast + likely to reach CLmax for many low-Re airfoils)
     ap.add_argument(
@@ -339,15 +348,29 @@ def main() -> None:
     args = ap.parse_args()
     base_segments = _parse_aseq_args(args.aseq)
 
-    # Resolve xfoil executable (allow "xfoil" from PATH)
+    # Resolve xfoil executable (prefer local file, fall back to PATH)
     xfoil_exe = Path(args.xfoil)
+    if not xfoil_exe.exists():
+        candidates = [
+            Path.cwd() / args.xfoil,
+            Path(__file__).resolve().parent / args.xfoil,
+        ]
+        # If user passed "xfoil" without suffix on Windows, try ".exe" locally
+        if os.name == "nt" and xfoil_exe.suffix == "":
+            candidates = [c.with_suffix(".exe") for c in candidates] + candidates
+
+        for cand in candidates:
+            if cand.exists():
+                xfoil_exe = cand
+                break
+
     if not xfoil_exe.exists():
         import shutil as _sh
         resolved = _sh.which(args.xfoil)
         if resolved is None:
             raise SystemExit(
                 f"XFOIL executable not found: {args.xfoil}\n"
-                f"Tip: pass full path like C:\\XFOIL\\xfoil.exe or ensure it's on PATH."
+                f"Tip: place xfoil.exe next to this script or pass full path like C:\\XFOIL\\xfoil.exe."
             )
         xfoil_exe = Path(resolved)
 
@@ -356,9 +379,16 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     airfoils = sorted(airfoil_dir.glob("*.dat"), reverse=True)
+    if args.starts_with:
+        prefix = str(args.starts_with).lower()
+        airfoils = [p for p in airfoils if p.stem.lower().startswith(prefix)]
     if args.limit is not None:
         airfoils = airfoils[: args.limit]
     if not airfoils:
+        if args.starts_with:
+            raise SystemExit(
+                f"No .dat files starting with '{args.starts_with}' found in {airfoil_dir}"
+            )
         raise SystemExit(f"No .dat files found in {airfoil_dir}")
 
     workdir = out_dir / "_xfoil_work"
