@@ -422,7 +422,7 @@ def _run_design_point():
         mainWing = Wing(
             wingFoil, altitude, 0.0,
             wingSpan,
-            wingChord, wingChord, 0.8*wingChord, 0.5,
+            wingChord, wingChord, wingChord, 0.5,
             0.0, 0.0, 0.0, 0.5,
             0.0, 0.0, True,
             xwqc,
@@ -456,8 +456,8 @@ def _run_design_point():
             eta=2.0,
         )
     
-        hwing.incidence = 0
-        mainWing.incidence = 1.0
+        hwing.incidence = -1.864e-01
+        mainWing.incidence = 1.964e+00
     
         boomLength = max(float(xhtqc - xwqc), float(boomLengthMin))
         boomMass = float(boomMassFixed) + float(boomMassPerM) * float(boomLength)
@@ -501,7 +501,7 @@ def _run_design_point():
     
         return commsNode, totalMass
     
-    design_point = [4.272, 0.26, 0.374, 0.976, 0.194, 1.574, 0.34798, 0.194]
+    design_point =  [4.411e+00,  2.709e-01,  3.414e-01,  1.446e+00,  2.379e-01, 1.138e+00,  3.420e-01,  2.474e-01]
     cache_version = 1
     cache_path = "aircraft_cache.pkl"
     
