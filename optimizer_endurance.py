@@ -407,10 +407,10 @@ def _example_run():
     booms = Fuselage(1.4, .03, 0.03, 1, 0.00635e-3, 0.05)
     batteryElectric = Powerplant(7992000, 0.59, 4000)
 
-    prepopulated_best = [4.456e+00,  3.250e-01,  4.765e-01,  1.526e+00, 2.714e-01,  1.165e+00, 3.714e+00, -1.864e-01]
+    prepopulated_best = [4.49333566,  0.26091753,  0.27316434,  0.90789589,  0.24928993,  1.13432068, -0.75385202, -0.11082719]
     run_mode = "de"  # "de" or "local_only"
     seed_de = False
-    local_only = run_mode == "local_only"
+    local_only = run_mode == "local_only"22
     x_start = prepopulated_best if (local_only or seed_de) else None
     bounds = [
         (4.0, 4.5),
