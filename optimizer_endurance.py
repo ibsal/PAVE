@@ -16,6 +16,7 @@ def optimize_endurance(
     cdomisc,
     baseMass,
     totalMassMax,
+    vtail_volume=0.03,
     staticMarginMin=0.05,
     staticMarginMax=0.30,
     levelFlightMargin=1.25,
@@ -40,7 +41,8 @@ def optimize_endurance(
     boomLengthMin = 0.05
 
     evalCount = 0
-    bestSeen = {"pwr": 1e30}
+    bestSeen = {"pwr": 1e30, "x": None}
+    reject_counts = {}
 
     if bounds is None:
         bounds = [
@@ -50,8 +52,6 @@ def optimize_endurance(
             (0.60, 1.8),
             (0.18, 0.30),
             (xcg + 0.2, xcg + 1.8),
-            (0.20, 1.0),
-            (0.08, 0.30),
             (-2.0, 4.0),   # wing incidence (deg)
             (-4.0, 4.0),   # tail incidence (deg)
         ]
@@ -83,7 +83,6 @@ def optimize_endurance(
         return area, mac
 
     def build_aircraft(x):
-        print("Iteration +1")
         wingSpan = float(x[0])
         wingChord = float(x[1])
         xwqc = float(x[2])
@@ -92,13 +91,9 @@ def optimize_endurance(
         hChord = float(x[4])
         xhtqc = float(x[5])
 
-        vHeight = float(x[6])
-        vChord = float(x[7])
         xvtqc = xhtqc
-        wingIncidence = float(x[8])
-        tailIncidence = float(x[9])
-        wingIncidence = float(x[8])
-        tailIncidence = float(x[9])
+        wingIncidence = float(x[6])
+        tailIncidence = float(x[7])
 
         mainWing = Wing(
             wingFoil, altitude, 0.0,
@@ -124,6 +119,14 @@ def optimize_endurance(
             elevatorTau=0.35,
             cd_deltae_k=0.0,
         )
+
+        if float(xvtqc - xcg) <= 0.0:
+            raise ValueError("xvtqc must be > xcg")
+        vtail_area = (float(vtail_volume) * float(mainWing.area) * float(mainWing.span)) / float(xvtqc - xcg)
+        if not np.isfinite(vtail_area) or vtail_area <= 0.0:
+            raise ValueError("Invalid vtail area")
+        vChord = float(np.sqrt(vtail_area / 2.0))
+        vHeight = vChord
 
         vwing = VerticalTail(
             tailFoil, altitude, 0.0,
@@ -183,11 +186,28 @@ def optimize_endurance(
     def objective(x):
         nonlocal evalCount, bestSeen
         evalCount += 1
+
+        def _report_counts():
+            if evalCount % 10 != 0:
+                return
+            best_pwr = bestSeen.get("pwr", 1e30)
+            best_txt = f"{best_pwr:.2f} W" if np.isfinite(best_pwr) and best_pwr < 1e29 else "NA"
+            parts = [f"{k}={v}" for k, v in sorted(reject_counts.items())]
+            line = f"[eval {evalCount}] " + " ".join(parts) + f" best_pwr={best_txt}"
+            if evalCount % 50 == 0 and bestSeen.get("x") is not None:
+                line += f" best_x={np.array(bestSeen['x'], dtype=float)}"
+            print(line)
+
+        def _reject(reason):
+            reject_counts[reason] = reject_counts.get(reason, 0) + 1
+            _report_counts()
+            return 1e30
+
         x = np.array(x, dtype=float).reshape(-1)
         if x.shape[0] != len(bounds):
-            return 1e30
+            return _reject("x_shape")
         if np.any(x < bounds_lo) or np.any(x > bounds_hi):
-            return 1e30
+            return _reject("bounds")
 
         wingSpan = float(x[0])
         wingChord = float(x[1])
@@ -197,21 +217,19 @@ def optimize_endurance(
         hChord = float(x[4])
         xhtqc = float(x[5])
 
-        vHeight = float(x[6])
-        vChord = float(x[7])
         xvtqc = xhtqc
 
-        if wingSpan <= 0.0 or wingChord <= 0.0 or hSpan <= 0.0 or hChord <= 0.0 or vHeight <= 0.0 or vChord <= 0.0:
-            return 1e30
+        if wingSpan <= 0.0 or wingChord <= 0.0 or hSpan <= 0.0 or hChord <= 0.0:
+            return _reject("geom_nonpos")
 
         if xwqc <= 0.0:
-            return 1e30
+            return _reject("xwqc")
 
         if xhtqc <= xcg or xvtqc <= xcg:
-            return 1e30
+            return _reject("tail_aft_cg")
 
-        if xhtqc <= xwqc:
-            return 1e30
+        if (xhtqc - 0.25*hChord) - (xwqc + 0.75*wingChord) < 0.5:  # min 0.5 m wing-TE to tail-LE clearance
+            return _reject("clearance")
 
         wing_area, wing_mac = _area_and_mac(
             wingSpan, wingChord, wingChord, wingChord, 0.5, symmetric=True
@@ -219,11 +237,14 @@ def optimize_endurance(
         htail_area, _ = _area_and_mac(
             hSpan, hChord, hChord, hChord, 0.5, symmetric=True
         )
-        vtail_area, _ = _area_and_mac(
-            2.0 * vHeight, vChord, vChord, vChord, 0.5, symmetric=True
-        )
         if wing_area <= 0.0 or wing_mac <= 0.0:
-            return 1e30
+            return _reject("wing_area")
+        tail_arm = float(xvtqc - xcg)
+        if tail_arm <= 0.0:
+            return _reject("tail_arm")
+        vtail_area = (float(vtail_volume) * float(wing_area) * float(wingSpan)) / tail_arm
+        if not np.isfinite(vtail_area) or vtail_area <= 0.0:
+            return _reject("vtail_area")
 
         boomLength = max(float(xhtqc - xwqc), float(boomLengthMin))
         boomMass = float(boomMassFixed) + float(boomMassPerM) * float(boomLength)
@@ -235,71 +256,61 @@ def optimize_endurance(
             + float(boomMass)
         )
         if totalMass_est > float(totalMassMax):
-            print("mass reject")
-            return 1e30
+            return _reject("mass_est")
 
         htail_volume = (htail_area * (xhtqc - xcg)) / (wing_area * wing_mac)
-        if (htail_volume < 0.3) or (htail_volume > 0.9):
-            print("Htail reject")
-            return 1e30
-
-        vtail_volume = (vtail_area * (xvtqc - xcg)) / (wing_area * wingSpan)
-        if (vtail_volume < 0.02) or (vtail_volume > 0.08):
-            print("Vtail reject")
-            return 1e30
+        if (htail_volume < 0.3) or (htail_volume > 0.7):
+            return _reject("htail_vol_est")
 
         try:
             commsNode, totalMass = build_aircraft(x)
         except Exception:
-            return 1e30
-        if (commsNode.horizontalTailVolume(xhtqc) < 0.3) or (commsNode.horizontalTailVolume(xhtqc) > 0.9):
-            print("Htail reject")
-            return 1e30
-        
-        if (commsNode.verticalTailVolume(xhtqc) < 0.02 or commsNode.verticalTailVolume(xhtqc) > 0.08):
-            print("Vtail reject")
-            return 1e30
+            return _reject("build_aircraft")
+        if (commsNode.horizontalTailVolume(xhtqc) < 0.3) or (commsNode.horizontalTailVolume(xhtqc) > 0.7):
+            return _reject("htail_vol")
         
         if totalMass > float(totalMassMax):
-            print("mass reject")
-            return 1e30
+            return _reject("mass")
 
         try:
             vbest, pwr, thrust = commsNode.solveBestVelocity(levelFlightMargin, vguess=20.0, res=res)
         except Exception:
-            return 1e30
+            return _reject("solve_vbest")
 
         if not np.isfinite(pwr) or pwr <= 0.0:
-            return 1e30
+            return _reject("pwr_nan")
 
         if float(pwr) > float(commsNode.pplant.pmax):
-            print("pwr reject")
-            return 1e30
+            return _reject("pwr_max")
 
+        # Re-trim at the best velocity before stability/trim checks
         try:
+            commsNode.velocity = float(vbest)
+            trim_sol = commsNode.solveTrim(res=res)
+            if trim_sol == [None, None]:
+                return _reject("trim_solve")
             sm = float(commsNode.staticMargin())
             cma = float(commsNode.cm_alpha())
         except Exception:
-            return 1e30
+            return _reject("stability_eval")
 
         if (sm < float(staticMarginMin)) or (sm > float(staticMarginMax)):
-            print("sm reject")
-            return 1e30
+            return _reject("static_margin")
 
         if cma > 0:
-            print("cma reject")
-            return 1e30
+            return _reject("cma_pos")
         
+        if abs(commsNode.trim) > 5:
+            return _reject("trim")
         
-
         pwr = float(pwr)
 
         if pwr < bestSeen["pwr"]:
             bestSeen["pwr"] = pwr
-            print(f"[best] eval={evalCount} pwr={pwr:.2f} W x={np.array(x, dtype=float)}")
+            bestSeen["x"] = np.array(x, dtype=float).copy()
 
-        print("Valid dp")
-
+        reject_counts["valid"] = reject_counts.get("valid", 0) + 1
+        _report_counts()
         return pwr
 
     de_result = None
@@ -376,10 +387,11 @@ def optimize_endurance(
             "hSpan": float(xbest[3]),
             "hChord": float(xbest[4]),
             "xhtqc": float(xbest[5]),
-            "vHeight": float(xbest[6]),
-            "vChord": float(xbest[7]),
-            "wingIncidence": float(xbest[8]),
-            "tailIncidence": float(xbest[9]),
+            "vHeight": float(commsNode.vtail.span * 0.5),
+            "vChord": float(commsNode.vtail.rootChord),
+            "vtailVolume": float(vtail_volume),
+            "wingIncidence": float(xbest[6]),
+            "tailIncidence": float(xbest[7]),
             "boomLength": float(max(float(xbest[5] - xbest[2]), float(boomLengthMin))),
         },
         "de_result": de_result,
@@ -395,9 +407,9 @@ def _example_run():
     booms = Fuselage(1.4, .03, 0.03, 1, 0.00635e-3, 0.05)
     batteryElectric = Powerplant(7992000, 0.59, 4000)
 
-    prepopulated_best = [4.41080926, 0.27086204,  0.34139652,  1.4461152,   0.23794212,  1.13802129, 0.34202525,  0.24741137,  1.96412508, -0.18642715]
-    run_mode = "local_only"  # "de" or "local_only"
-    seed_de = True
+    prepopulated_best = [4.456e+00,  3.250e-01,  4.765e-01,  1.526e+00, 2.714e-01,  1.165e+00, 3.714e+00, -1.864e-01]
+    run_mode = "de"  # "de" or "local_only"
+    seed_de = False
     local_only = run_mode == "local_only"
     x_start = prepopulated_best if (local_only or seed_de) else None
     bounds = [
@@ -407,8 +419,6 @@ def _example_run():
         (0.60, 1.8),
         (0.18, 0.30),
         (0.45 + 0.2, 0.45 + 1.8),
-        (0.20, 0.9),
-        (0.08, 0.30),
         (-2.0, 4.0),   # wing incidence (deg)
         (-4.0, 4.0),   # tail incidence (deg)
     ]
@@ -419,7 +429,7 @@ def _example_run():
         altitude=200,
         batteryElectric=batteryElectric,
         fuselages=[body, booms, booms],
-        xcg=0.45,
+        xcg=0.35,
         cdomisc=0.01,
         baseMass=17.5,
         totalMassMax=22.6796,
@@ -427,17 +437,17 @@ def _example_run():
         staticMarginMax=0.30,
         levelFlightMargin=1.25,
         res=1,
-        seed=7,
-        maxiter=10,
-        popsize=10,
+        seed=1,
+        maxiter=50,
+        popsize=20,
         polish=False,
-        local_refine="L-BFGS-B", #can fuck with method here: L-BFGS-B uses derivatives so only good in vicinity, powell does not use derivative so can be safer
+        local_refine="powell", #can fuck with method here: L-BFGS-B uses derivatives so only good in vicinity, powell does not use derivative so can be safer
         local_maxiter=200,
         local_only=local_only,
         x_start=x_start,
         bounds=bounds,
     )
-    print(best)
+    _ = best
 
 if __name__ == "__main__":
     _example_run()
