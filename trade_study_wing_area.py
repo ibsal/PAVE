@@ -36,7 +36,7 @@ def main():
     fixed_span = float(comms.design_point[0])
     base_chord = float(comms.design_point[1])
 
-    chord_scales = np.linspace(0.6, 1.4, 19)
+    chord_scales = np.linspace(0.6, 1.4, 10)
     areas = []
     cruise_speeds = []
     endurances = []
