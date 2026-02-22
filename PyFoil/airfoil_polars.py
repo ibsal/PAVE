@@ -443,6 +443,66 @@ class PolarSet:
         i = int(np.nanargmax(cls))
         return float(alphas[i]), float(cls[i])
     
+    def area_and_moi(
+        self,
+        *,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        chord: float = 1.0,
+        dat_path: Optional[Union[str, Path]] = None,
+        x_coords: Optional[Sequence[float]] = None,
+        y_coords: Optional[Sequence[float]] = None,
+    ) -> Tuple[float, float]:
+        """
+        Shoelace area and area moment of inertia about either x=<const> or y=<const>.
+        Coordinates can come from a Selig .dat file or explicit x/y arrays.
+        """
+        if (x is None) == (y is None):
+            raise ValueError("Pass exactly one of x= or y= for MOI axis selection.")
+
+        if dat_path is not None:
+            pts = []
+            for line in Path(dat_path).read_text().splitlines():
+                s = line.strip().split()
+                if len(s) >= 2:
+                    try:
+                        pts.append((float(s[0]), float(s[1])))
+                    except ValueError:
+                        pass
+            xy = np.asarray(pts, dtype=float)
+            xv, yv = xy[:, 0], xy[:, 1]
+        else:
+            xv = np.asarray(x_coords, dtype=float).ravel()
+            yv = np.asarray(y_coords, dtype=float).ravel()
+
+        xv = xv * float(chord)
+        yv = yv * float(chord)
+        if xv[0] != xv[-1] or yv[0] != yv[-1]:
+            xv = np.append(xv, xv[0])
+            yv = np.append(yv, yv[0])
+
+        x1 = np.roll(xv, -1)
+        y1 = np.roll(yv, -1)
+        cross = xv * y1 - x1 * yv
+        a_signed = 0.5 * np.sum(cross)
+        sgn = 1.0 if a_signed >= 0.0 else -1.0
+        area = abs(a_signed)
+        cx = np.sum((xv + x1) * cross) / (6.0 * a_signed)
+        cy = np.sum((yv + y1) * cross) / (6.0 * a_signed)
+
+        ixx_o = sgn * np.sum((yv * yv + yv * y1 + y1 * y1) * cross) / 12.0
+        iyy_o = sgn * np.sum((xv * xv + xv * x1 + x1 * x1) * cross) / 12.0
+        ixx_c = ixx_o - area * cy * cy
+        iyy_c = iyy_o - area * cx * cx
+
+        if y is not None:
+            yp = float(y) * float(chord)
+            moi = ixx_c + area * (cy - yp) ** 2
+        else:
+            xp = float(x) * float(chord)
+            moi = iyy_c + area * (cx - xp) ** 2
+        return float(area), float(moi)
+    
 
     def cdo_and_lift_slope(
         self,

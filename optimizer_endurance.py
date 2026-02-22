@@ -86,6 +86,9 @@ def optimize_endurance(
     bounds_lo = np.array([b[0] for b in bounds], dtype=float)
     bounds_hi = np.array([b[1] for b in bounds], dtype=float)
     hard_reject_value = 1e30
+    # Allow a small numerical tolerance because solveTrim uses a root solver.
+    lift_shortfall_tol_frac = 1.0e-3
+    lift_shortfall_tol_abs_n = 1.0
     cruiseVelocityMode = str(cruiseVelocityMode).strip().lower()
     if cruiseVelocityMode not in ("optimal", "stall_margin"):
         raise ValueError(
@@ -121,6 +124,8 @@ def optimize_endurance(
         "static_margin": 3.0e5,
         "cma_pos": 3.0e5,
         "trim": 2.0e4,
+        "tail_lift_nonnegative": 3.0e5,
+        "lift_insufficient": 3.0e5,
         # Mass / power constraints
         "mass_est": 4.0e4,
         "mass": 6.0e4,
@@ -214,6 +219,9 @@ def optimize_endurance(
         "pwr_max_W",
         "staticMargin",
         "cm_alpha",
+        "tail_lift_N",
+        "lift_N",
+        "weight_N",
         "trim_deg",
         "viol_bounds",
         "viol_clearance_m",
@@ -224,6 +232,8 @@ def optimize_endurance(
         "viol_mass_kg",
         "viol_pwr_max_W",
         "viol_static_margin",
+        "viol_tail_lift_N",
+        "viol_lift_N",
         "viol_trim_deg",
     ]
 
@@ -403,6 +413,25 @@ def optimize_endurance(
         )
 
         return commsNode, totalMass
+
+    def _tail_lift_from_trimmed_state(commsNode, res_eval):
+        wing_force = commsNode.mwing.forces(
+            commsNode.xcg,
+            commsNode.altitude,
+            commsNode.velocity,
+            commsNode.aoa,
+            n=res_eval,
+        )
+        tail_force = commsNode.hwing.forces(
+            commsNode.xcg,
+            commsNode.altitude,
+            commsNode.velocity,
+            commsNode.aoa,
+            downwash=wing_force[3],
+            elevator=commsNode.trim,
+            n=res_eval,
+        )
+        return float(tail_force[1])
 
     def objective(x):
         nonlocal evalCount, bestSeen
@@ -643,13 +672,20 @@ def optimize_endurance(
             trim_sol = commsNode.solveTrim(res=res)
             if trim_sol == [None, None]:
                 return _constraint_fail("trim_solve", 1.0)
+            trim_forces = commsNode.sumFanddM(res=res)
+            total_lift = float(trim_forces[1])
+            total_weight = float(commsNode.weight)
             sm = float(commsNode.staticMargin())
             cma = float(commsNode.cm_alpha())
+            tail_lift = _tail_lift_from_trimmed_state(commsNode, res_eval=res)
         except Exception:
             return _constraint_fail("stability_eval", 1.0)
         eval_row["has_trim_data"] = 1
         eval_row["staticMargin"] = sm
         eval_row["cm_alpha"] = cma
+        eval_row["tail_lift_N"] = tail_lift
+        eval_row["lift_N"] = total_lift
+        eval_row["weight_N"] = total_weight
         eval_row["trim_deg"] = float(commsNode.trim)
 
         static_margin_violation = max(0.0, float(staticMarginMin - sm)) + max(0.0, float(sm - staticMarginMax))
@@ -659,6 +695,20 @@ def optimize_endurance(
 
         if cma > 0:
             return _constraint_fail("cma_pos", cma)
+
+        tail_lift_violation = max(0.0, tail_lift)
+        eval_row["viol_tail_lift_N"] = tail_lift_violation
+        if tail_lift >= 0.0:
+            return _constraint_fail("tail_lift_nonnegative", tail_lift_violation)
+
+        lift_shortfall_tol_n = max(
+            float(lift_shortfall_tol_abs_n),
+            float(lift_shortfall_tol_frac) * abs(float(total_weight)),
+        )
+        lift_shortfall_violation = max(0.0, float(total_weight) - float(total_lift) - lift_shortfall_tol_n)
+        eval_row["viol_lift_N"] = lift_shortfall_violation
+        if lift_shortfall_violation > 0.0:
+            return _constraint_fail("lift_insufficient", lift_shortfall_violation)
         
         trim_violation = max(0.0, abs(float(commsNode.trim)) - float(trimAbsMaxDeg))
         eval_row["viol_trim_deg"] = trim_violation
@@ -749,6 +799,20 @@ def optimize_endurance(
             res=res,
             mode=cruiseVelocityMode,
         )
+        commsNode.velocity = float(vbest)
+        trim_sol = commsNode.solveTrim(res=res)
+        if trim_sol == [None, None]:
+            raise RuntimeError("trim_solve")
+        total_lift = float(commsNode.sumFanddM(res=res)[1])
+        lift_shortfall_tol_n = max(
+            float(lift_shortfall_tol_abs_n),
+            float(lift_shortfall_tol_frac) * abs(float(commsNode.weight)),
+        )
+        if float(commsNode.weight) - total_lift > lift_shortfall_tol_n:
+            raise RuntimeError("lift_insufficient")
+        tail_lift = _tail_lift_from_trimmed_state(commsNode, res_eval=res)
+        if tail_lift >= 0.0:
+            raise RuntimeError("tail_lift_nonnegative")
         sm = float(commsNode.staticMargin())
     except Exception as exc:
         if bestSeen.get("x") is None:
@@ -765,6 +829,23 @@ def optimize_endurance(
             res=res,
             mode=cruiseVelocityMode,
         )
+        commsNode.velocity = float(vbest)
+        trim_sol = commsNode.solveTrim(res=res)
+        if trim_sol == [None, None]:
+            _flush_eval_log(force=True)
+            raise RuntimeError("Best feasible design failed to trim at returned cruise velocity.") from exc
+        total_lift = float(commsNode.sumFanddM(res=res)[1])
+        lift_shortfall_tol_n = max(
+            float(lift_shortfall_tol_abs_n),
+            float(lift_shortfall_tol_frac) * abs(float(commsNode.weight)),
+        )
+        if float(commsNode.weight) - total_lift > lift_shortfall_tol_n:
+            _flush_eval_log(force=True)
+            raise RuntimeError("Best feasible design cannot produce enough lift at returned cruise velocity.") from exc
+        tail_lift = _tail_lift_from_trimmed_state(commsNode, res_eval=res)
+        if tail_lift >= 0.0:
+            _flush_eval_log(force=True)
+            raise RuntimeError("Best feasible design violates negative horizontal tail lift constraint.") from exc
         sm = float(commsNode.staticMargin())
         fallback_to_feasible = True
     if fallback_to_feasible:
@@ -804,7 +885,7 @@ def optimize_endurance(
 
 
 def _example_run():
-    wingFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="e423")
+    wingFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="psu94097")
     tailFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
     body = Fuselage(1.0541, .3048, 0.21336, 0.9, 0.00635e-3, 0.3)
     booms = Fuselage(1.4, .03, 0.03, 1, 0.00635e-3, 0.05)
@@ -813,18 +894,18 @@ def _example_run():
 
     prepopulated_best = [4.4, 0.3, 0.29024762, 0.46046029, 0.18097007, 2.01117241, 0.32476509, 3.30305594]
     run_mode = "de"  # "de" or "local_only"
-    seed_de = True
+    seed_de = False
     local_only = run_mode == "local_only"
     x_start = prepopulated_best if (local_only or seed_de) else None
     bounds = [
-        (3.0, 4.5),
-        (0.27, 0.4),
+        (4.4, 4.572),
+        (0.27, 0.6),
         (0.05, xcg + 0.2),
-        (0.40, 2.0),
+        (0.60, 1.2),
         (0.18, 0.30),
         (xcg + 0.2, xcg + 1.8),
         (0.0, 3.0),   # wing incidence (deg)
-        (-4.0, 4.0),   # tail incidence (deg)
+        (-3.0, 2.0),   # tail incidence (deg)
     ]
     use_penalty = True
     penalty_exponent = 1.35
@@ -835,7 +916,7 @@ def _example_run():
     htail_volume_min = 0.3
     htail_volume_max = 0.7
     trim_abs_max_deg = 5.0
-    cruise_velocity_mode = "stall_margin"  # "optimal" or "stall_margin"
+    cruise_velocity_mode = "optimal"  # "optimal" or "stall_margin"
     evaluation_log_path = "optimizer_endurance_eval_log.csv"
     penalty_weight_overrides = {
         # Example overrides; omitted keys use defaults defined in optimize_endurance.
