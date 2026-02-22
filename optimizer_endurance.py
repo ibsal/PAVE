@@ -900,10 +900,10 @@ def _example_run():
     bounds = [
         (4.4, 4.572),
         (0.3048, 0.6),
-        (0.05, xcg + 0.2),
-        (0.60, 1.2),
-        (0.18, 0.30),
-        (xcg + 0.2, xcg + 1.8),
+        (0.05, xcg + 0.3),
+        (0.60, 1.8),
+        (0.18, 0.40),
+        (xcg + 0.4, xcg + 3.0),
         (0.0, 3.0),   # wing incidence (deg)
         (-3.0, 2.0),   # tail incidence (deg)
     ]
@@ -933,7 +933,7 @@ def _example_run():
         fuselages=[body, booms, booms],
         xcg=xcg,
         cdomisc=0.01,
-        baseMass=17.5,
+        baseMass=12.5,
         totalMassMax=22.6796,
         htailArMin=htail_ar_min,
         htailArMax=htail_ar_max,
