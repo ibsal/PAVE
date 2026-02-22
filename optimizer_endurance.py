@@ -899,7 +899,7 @@ def _example_run():
     x_start = prepopulated_best if (local_only or seed_de) else None
     bounds = [
         (4.4, 4.572),
-        (0.27, 0.6),
+        (0.3048, 0.6),
         (0.05, xcg + 0.2),
         (0.60, 1.2),
         (0.18, 0.30),

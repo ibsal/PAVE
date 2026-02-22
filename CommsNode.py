@@ -176,9 +176,9 @@ class Wing:
     def stallCondition(self, altitude, weight, v0=20.0):
         density = Atmosphere(altitude).density[0]
         vcand = v0
-        tol = 1
+        clmax = 0.0
         stall_aoa = 0.0
-        while tol > 0.01:
+        for _ in range(50):
             qa = 0.5 * density * vcand**2 * self.area
             neg_l = lambda x: -self.forces(10, altitude, vcand, x)[1]
             stall_aoa = float(scipy.optimize.fmin(neg_l, 2, xtol=0.001, disp=False)[0])
@@ -186,7 +186,8 @@ class Wing:
             clmax = lmax / qa
             vol = vcand
             vcand = math.sqrt((2 * weight) / (density * self.area * clmax))
-            tol = abs(vcand - vol)
+            if abs(vcand - vol) <= 0.01:
+                break
         return vcand, clmax, stall_aoa
 
     def stallSpeed(self, altitude, weight, v0=20.0):
@@ -423,15 +424,15 @@ class Aircraft:
                     self.velocity = velocity
                     self.aoa = float(alpha0)
                     self.trim = float(de0)
-                    sol = self.solveTrim(alpha0=alpha0, de0=de0, res=res)
+                    sol, forces = self.solveTrim(alpha0=alpha0, de0=de0, res=res, _return_forces=True)
                     if sol == [None, None]:
                         continue
-                    drag = float(self.sumFanddM(res=res)[0])
+                    drag = float(forces[0])
                     power = float(drag) * velocity
                     if not (np.isfinite(drag) and np.isfinite(power) and power > 0.0):
                         continue
-                    if best is None or power < best[0]:
-                        best = (power, drag, float(sol[0]), float(sol[1]))
+                    best = (power, drag, float(sol[0]), float(sol[1]))
+                    break  # seeds are ordered best-first; stop at first success
             finally:
                 self.velocity, self.aoa, self.trim = call_state
             return best
@@ -461,7 +462,7 @@ class Aircraft:
                     if opt_result.success:
                         candidate_velocity = float(opt_result.x)
                         candidate_power = power(candidate_velocity)
-                        if np.isfinite(candidate_power) and candidate_power <= power(selected_velocity):
+                        if np.isfinite(candidate_power) and candidate_power <= float(sweep_p[best_idx]):
                             selected_velocity = candidate_velocity
         else:
             raise ValueError(f"Unsupported cruise speed mode '{mode}'. Use 'optimal' or 'stall_margin'.")
