@@ -5,12 +5,30 @@ import scipy.optimize
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Helper functions
+G = 9.80665
+
+# --- Unit conversion constants ---
+KNOTS_PER_MPS           = 1.9438444924406
+KNOT_TO_MPS             = 1.0 / KNOTS_PER_MPS
+MPS_TO_KNOT             = KNOTS_PER_MPS
+LBF_PER_NEWTON          = 0.2248089431
+IN_PER_M                = 39.37007874015748
+LB_PER_KG               = 2.2046226218487757
+IN2_PER_M2              = IN_PER_M * IN_PER_M
+LB_PER_IN2_PER_KG_PER_M2 = LB_PER_KG / IN2_PER_M2
+MI_PER_NM               = 1.1507794480235425
+M_TO_FT                 = 3.28084
+FT_PER_MIN_PER_MPS      = M_TO_FT * 60.0
+
+
+# --- Helper functions ---
 
 def re(altitude, velocity, l):
-    return (l*velocity)/Atmosphere(altitude).kinematic_viscosity[0]
+    return (l * velocity) / Atmosphere(altitude).kinematic_viscosity[0]
 
-def skin_friction_cf(re, roughness, length, laminar_frac=0.0, re_crit_per_m=5e5): # Cf calculation for drag buildup 
+
+def skin_friction_cf(re, roughness, length, laminar_frac=0.0, re_crit_per_m=5e5):
+    """Cf calculation for drag buildup."""
     if re <= 0.0 or length <= 0.0:
         return 0.0
     cf_lam = 1.328 / math.sqrt(re)
@@ -28,8 +46,12 @@ def skin_friction_cf(re, roughness, length, laminar_frac=0.0, re_crit_per_m=5e5)
         cf_base = lam * cf_lam + (1.0 - lam) * cf_turb
     return cf_base
 
+
 class Wing:
-    def __init__(self, airfoil:PolarSet, altitude, velocity, span, rootChord, midChord, tipChord, midChordPosition, rootSweep, midSweep, tipSweep, midSweepPosition, incidence, aoa, symmetric, xqc, weight, arealDensity):
+    def __init__(self, airfoil: PolarSet, altitude, velocity, span,
+                 rootChord, midChord, tipChord, midChordPosition,
+                 rootSweep, midSweep, tipSweep, midSweepPosition,
+                 incidence, aoa, symmetric, xqc, weight, arealDensity):
         self.airfoil = airfoil
         self.span = span
         self.rootChord = rootChord
@@ -44,80 +66,109 @@ class Wing:
         self.symmetric = symmetric
         self.xqc = xqc
         self.arealDensity = arealDensity
-        
 
-        self.area  = 2.0*(0.5*(self.rootChord + self.midChord)*(self.midChordPosition*0.5*self.span) + 0.5*(self.midChord + self.tipChord)*(0.5*self.span - self.midChordPosition*0.5*self.span))
-        if not(symmetric):
-            self.area = self.area/2.0
-        self.mac   = (2.0*(((self.midChordPosition*0.5*self.span)/3.0)*(self.rootChord**2 + self.rootChord*self.midChord + self.midChord**2) + ((0.5*self.span - self.midChordPosition*0.5*self.span)/3.0)*(self.midChord**2 + self.midChord*self.tipChord + self.tipChord**2)))/self.area
-        self.ar    = self.span**2 / self.area
+        self.area = 2.0 * (
+            0.5 * (self.rootChord + self.midChord) * (self.midChordPosition * 0.5 * self.span)
+            + 0.5 * (self.midChord + self.tipChord) * (0.5 * self.span - self.midChordPosition * 0.5 * self.span)
+        )
+        if not symmetric:
+            self.area = self.area / 2.0
+        self.mac = (2.0 * (
+            ((self.midChordPosition * 0.5 * self.span) / 3.0)
+            * (self.rootChord**2 + self.rootChord * self.midChord + self.midChord**2)
+            + ((0.5 * self.span - self.midChordPosition * 0.5 * self.span) / 3.0)
+            * (self.midChord**2 + self.midChord * self.tipChord + self.tipChord**2)
+        )) / self.area
+        self.ar = self.span**2 / self.area
         self.taper = self.tipChord / self.rootChord
-        self.e_oswald_w = 1.78*(1.0 - 0.045*(self.ar**0.68)) - 0.64
+        self.e_oswald_w = 1.78 * (1.0 - 0.045 * (self.ar**0.68)) - 0.64
         self.e_oswald_w = min(max(self.e_oswald_w, 0.3), 0.95)
         self.mass = self.arealDensity * self.area
 
     def cl2d(self, alpha_deg, reynold):
         return self.airfoil.cl(alpha_deg=alpha_deg, reynolds=reynold)
-    
+
     def cd2d(self, alpha_deg, reynold):
         return self.airfoil.cd(alpha_deg=alpha_deg, reynolds=reynold)
-    
+
     def cm2d(self, alpha_deg, reynold):
         return self.airfoil.cm(alpha_deg=alpha_deg, reynolds=reynold)
-    
+
     def forces(self, xref, altitude, velocity, aoa, n=50):
         # Coerce AoA to scalar to avoid mixed float/array coeffs during optimization
         aoa = float(np.asarray(aoa).ravel()[0])
+        hspan = self.span / 2.0 if self.symmetric else self.span
+        dx = hspan / n
+
+        # --- Vectorized geometry ---
+        s_arr = (np.arange(n) + 0.5) * dx
+
+        # Local chord (piecewise linear, safe denominators)
+        mid_s      = hspan * self.midChordPosition
+        cslope_in  = (self.midChord - self.rootChord) / max(self.midChordPosition * hspan, 1e-30)
+        cslope_out = (self.tipChord - self.midChord)  / max((1.0 - self.midChordPosition) * hspan, 1e-30)
+        clocal = np.where(
+            s_arr <= mid_s,
+            s_arr * cslope_in  + self.rootChord,
+            (s_arr - mid_s) * cslope_out + self.midChord,
+        )
+
+        # Local sweep (piecewise linear, safe denominators)
+        mid_sw     = hspan * self.midSweepPosition
+        sslope_in  = (self.midSweep - self.rootSweep) / max(self.midSweepPosition * hspan, 1e-30)
+        sslope_out = (self.tipSweep - self.midSweep)  / max((1.0 - self.midSweepPosition) * hspan, 1e-30)
+        slocal = np.where(
+            s_arr <= mid_sw,
+            s_arr * sslope_in  + self.rootSweep,
+            (s_arr - mid_sw) * sslope_out + self.midSweep,
+        )
+
+        # Quarter-chord running x-position (cumulative sum, equivalent to original loop)
+        tan_s  = np.tan(np.radians(slocal))
+        cos_s  = np.cos(np.radians(slocal))
+        cumtan = np.empty(n, dtype=float)
+        cumtan[0] = 0.0
+        cumtan[1:] = np.cumsum(tan_s[:-1])
+        xqcmid    = self.xqc + dx * (cumtan + 0.5 * tan_s)
+        momentarm = xref - xqcmid
+
+        # --- Atmosphere: single object creation for both density and kinematic viscosity ---
+        atm     = Atmosphere(altitude)
+        density = float(atm.density[0])
+        nu      = float(atm.kinematic_viscosity[0])
+
+        veff    = velocity * cos_s
+        relocal = veff * clocal / nu   # Reynolds per station
+
+        # --- Aerodynamic coefficients ---
+        # Evaluate each polar at the (fixed) effective alpha once, then Re-interpolate
+        # across all stations with a single vectorised np.interp call.
+        # Reduces alpha lookups from n*n_polars to just n_polars.
+        alpha_eff = aoa + self.incidence
+        re_nodes  = self.airfoil.reynolds_list                              # ascending Re
+        cl_nodes  = np.array([p.cl_at(alpha_eff)       for p in self.airfoil.polars])
+        cd_nodes  = np.array([p.cd_at(alpha_eff)       for p in self.airfoil.polars])
+        cm_nodes  = np.array([p.coeff("cm", alpha_eff) for p in self.airfoil.polars])
+
+        cllocal = np.interp(relocal, re_nodes, cl_nodes)   # clamps at endpoints
+        cdlocal = np.interp(relocal, re_nodes, cd_nodes)
+        cmlocal = np.interp(relocal, re_nodes, cm_nodes)
+
+        # --- Integrate forces (fully vectorised) ---
+        qeff   = 0.5 * density * veff**2
+        drag   = float(np.sum(qeff * cdlocal * dx * clocal))
+        lift   = float(np.sum(qeff * cllocal * dx * clocal * cos_s))
+        moment = float(np.sum(  cmlocal   * qeff * dx * clocal**2
+                              + momentarm * qeff * cllocal * dx * clocal * cos_s))
+
         if self.symmetric:
-            hspan = self.span/2.0
-        else: 
-            hspan = self.span
-
-        dx = hspan/n
-        stations = [dx * (i + 0.5) for i in range(n)]
-        drag = 0
-        lift = 0
-        moment = 0
-
-        density = Atmosphere(altitude).density[0]
-        xqcedge = self.xqc
-        for s in stations:
-            if s>(hspan*self.midChordPosition):
-                cslope = (self.tipChord - self.midChord)/((1 - self.midChordPosition) * hspan)
-                clocal = (s - hspan*self.midChordPosition) * cslope  + self.midChord
-            else:
-                cslope = (self.midChord - self.rootChord)/(self.midChordPosition * hspan)
-                clocal = s * cslope  + self.rootChord
-            if s>(hspan*self.midSweepPosition):
-                sslope = (self.tipSweep - self.midSweep)/((1 - self.midSweepPosition) * hspan)
-                slocal = (s - hspan*self.midSweepPosition) * sslope  + self.midSweep
-            else:
-                sslope = (self.midSweep - self.rootSweep)/(self.midSweepPosition * hspan)
-                slocal = s * sslope + self.rootSweep
-
-            xqcmid = xqcedge + math.tan(math.radians(slocal))*(0.5*dx)
-            momentarm = xref - xqcmid
-            xqcedge += math.tan(math.radians(slocal))*dx
-
-            veff = velocity * math.cos(math.radians(slocal))
-            relocal = re(altitude, veff, clocal)
-            cdlocal = self.cd2d(aoa + self.incidence, relocal)
-            cllocal = self.cl2d(aoa + self.incidence, relocal)
-            cmlocal = self.cm2d(aoa + self.incidence, relocal)
-            qeff =  0.5 * density * veff**2
-            drag += qeff * cdlocal * dx * clocal
-            lift += qeff * cllocal * dx * clocal * math.cos(math.radians(slocal))
-            moment += cmlocal * qeff * dx * clocal**2
-            moment += momentarm * qeff * cllocal * dx * clocal * math.cos(math.radians(slocal))
-
-        if self.symmetric: 
-            drag *=2
-            lift *=2
-            moment *=2
+            drag   *= 2.0
+            lift   *= 2.0
+            moment *= 2.0
 
         aq = 0.5 * density * velocity**2 * self.area
-        cleq = lift/(aq)       
-        drag += aq * (cleq**2)/(math.pi * self.ar * self.e_oswald_w)
+        cleq  = lift / aq
+        drag += aq * (cleq**2) / (math.pi * self.ar * self.e_oswald_w)
 
         downwash = 57.2958 * cleq / (math.pi * self.ar * self.e_oswald_w)
         return [drag, lift, moment, downwash]
@@ -127,20 +178,21 @@ class Wing:
         vcand = v0
         tol = 1
         stall_aoa = 0.0
-        while(tol>0.01):
+        while tol > 0.01:
             qa = 0.5 * density * vcand**2 * self.area
             neg_l = lambda x: -self.forces(10, altitude, vcand, x)[1]
             stall_aoa = float(scipy.optimize.fmin(neg_l, 2, xtol=0.001, disp=False)[0])
             lmax = -1 * neg_l(stall_aoa)
-            clmax = lmax/(qa)
+            clmax = lmax / qa
             vol = vcand
-            vcand = math.sqrt((2* weight)/(density * self.area * clmax))
-            tol = abs(vcand-vol)
+            vcand = math.sqrt((2 * weight) / (density * self.area * clmax))
+            tol = abs(vcand - vol)
         return vcand, clmax, stall_aoa
 
     def stallSpeed(self, altitude, weight, v0=20.0):
         vcand, clmax, _stall_aoa = self.stallCondition(altitude, weight, v0=v0)
         return vcand, clmax
+
 
 class HorizontalTail(Wing):
     def __init__(
@@ -172,7 +224,7 @@ class HorizontalTail(Wing):
             airfoil, altitude, velocity, span,
             rootChord, midChord, tipChord, midChordPosition,
             rootSweep, midSweep, tipSweep, midSweepPosition,
-            incidence, aoa, symmetric, xqc, weight, arealDensity
+            incidence, aoa, symmetric, xqc, weight, arealDensity,
         )
         self.elevatorTau = elevatorTau
         self.cd_deltae_k = cd_deltae_k
@@ -180,8 +232,8 @@ class HorizontalTail(Wing):
 
     def forces(self, xref, altitude, velocity, aoa, n=100, downwash=0.0, elevator=0.0):
         aoa_eff = aoa - downwash + self.elevatorTau * elevator
-        out = super().forces(xref, altitude, velocity, aoa_eff, n=n)
-        return out
+        return super().forces(xref, altitude, velocity, aoa_eff, n=n)
+
 
 class VerticalTail(Wing):
     def __init__(
@@ -203,13 +255,13 @@ class VerticalTail(Wing):
         xqc,
         weight,
         arealDensity,
-        eta=1.0
+        eta=1.0,
     ):
         super().__init__(
-            airfoil, altitude, velocity, 2.0*height,
+            airfoil, altitude, velocity, 2.0 * height,
             rootChord, midChord, tipChord, midChordPosition,
             rootSweep, midSweep, tipSweep, midSweepPosition,
-            incidence, beta, True, xqc, weight, 2.0*arealDensity
+            incidence, beta, True, xqc, weight, 2.0 * arealDensity,
         )
         self.eta = eta
 
@@ -220,6 +272,7 @@ class VerticalTail(Wing):
         out[2] *= self.eta
         return out
 
+
 class Fuselage:
     def __init__(self, length, width, height, pfactor, roughness, laminarfraction, qfactor=1.0, quantity=1):
         self.length = length
@@ -228,21 +281,22 @@ class Fuselage:
         self.pfactor = pfactor
         self.roughness = roughness
         self.laminarfraction = laminarfraction
-        self.perimeter = (2*self.width + 2*self.height)*pfactor
-        self.diameter = self.perimeter/math.pi
+        self.perimeter = (2 * self.width + 2 * self.height) * pfactor
+        self.diameter = self.perimeter / math.pi
         self.qfactor = qfactor
         self.quantity = quantity
-        
+
     def drag(self, altitude, velocity):
         rlocal = re(altitude, velocity, self.length)
-        fratio = self.length/self.diameter
-        ff = (1 + 60/fratio**3) + fratio/400
+        fratio = self.length / self.diameter
+        ff = (1 + 60 / fratio**3) + fratio / 400
         cfc = skin_friction_cf(rlocal, self.roughness, self.length, self.laminarfraction)
         fuse_term = max(1.0 - 2.0 / max(fratio, 1e-6), 0.0)
-        swet = (math.pi * self.diameter * self.length * math.pow(fuse_term, 2.0/3.0) * (1 + 1/(fratio**2)))
+        swet = (math.pi * self.diameter * self.length
+                * math.pow(fuse_term, 2.0 / 3.0) * (1 + 1 / (fratio**2)))
         cdo = ff * self.qfactor * cfc
-        drag = cdo * 0.5 * Atmosphere(altitude).density[0] * velocity**2 *swet
-        return drag
+        return cdo * 0.5 * Atmosphere(altitude).density[0] * velocity**2 * swet
+
 
 class Powerplant:
     def __init__(self, bcap, neff, pmax):
@@ -250,21 +304,27 @@ class Powerplant:
         self.bcap = bcap
         self.neff = neff
         self.pmax = pmax
+
     def drawBattery(self, duration, power):
-        self.bcap -= duration*power
+        self.bcap -= duration * power
         return self.bcap
-    def validThrust(self,thrust, velocity):
-        if (thrust/self.neff)/velocity >= self.pmax: return False
+
+    def validThrust(self, thrust, velocity):
+        if (thrust / self.neff) / velocity >= self.pmax:
+            return False
         return True
 
+
 class Aircraft:
-    def __init__(self, altitude, velocity, pplant:Powerplant, mwing:Wing, hwing:HorizontalTail, vtail:VerticalTail, fuselages:list[Fuselage], aoa, trim, xcg, weight, cdomisc):
+    def __init__(self, altitude, velocity, pplant: Powerplant, mwing: Wing,
+                 hwing: HorizontalTail, vtail: VerticalTail, fuselages: list[Fuselage],
+                 aoa, trim, xcg, weight, cdomisc):
         self.altitude = altitude
         self.velocity = velocity
         self.mwing = mwing
         self.hwing = hwing
         self.vtail = vtail
-        self.fuselages = fuselages 
+        self.fuselages = fuselages
         self.pplant = pplant
         self.aoa = aoa
         self.trim = trim
@@ -276,7 +336,8 @@ class Aircraft:
 
     def sumFanddM(self, res=100):
         wForce = self.mwing.forces(self.xcg, self.altitude, self.velocity, self.aoa, n=res)
-        hForce = self.hwing.forces(self.xcg, self.altitude, self.velocity, self.aoa, downwash=wForce[3], elevator=self.trim, n=res)
+        hForce = self.hwing.forces(self.xcg, self.altitude, self.velocity, self.aoa,
+                                   downwash=wForce[3], elevator=self.trim, n=res)
 
         vDrag = 0.0
         if self.vtail is not None:
@@ -287,34 +348,49 @@ class Aircraft:
         for f in self.fuselages:
             fDrag += float(f.drag(self.altitude, self.velocity)) * float(getattr(f, "quantity", 1))
 
-        Drag = float(wForce[0]) + float(hForce[0]) + vDrag + fDrag + 0.5 * Atmosphere(self.altitude).density[0] * self.velocity**2 * self.cdomisc * self.mwing.area
+        Drag = (float(wForce[0]) + float(hForce[0]) + vDrag + fDrag
+                + 0.5 * Atmosphere(self.altitude).density[0] * self.velocity**2
+                * self.cdomisc * self.mwing.area)
         Lift = float(wForce[1]) + float(hForce[1])
         Moment = float(wForce[2]) + float(hForce[2])
         return [Drag, Lift, Moment]
 
-    def solveTrim(self, alpha0=None, de0=None, res=100):
-        if alpha0 is None: alpha0 = float(self.aoa)
-        if de0 is None: de0 = float(self.trim)
+    def solveTrim(self, alpha0=None, de0=None, res=100, _return_forces=False):
+        if alpha0 is None:
+            alpha0 = float(self.aoa)
+        if de0 is None:
+            de0 = float(self.trim)
+
+        # Cache the forces from the last residual evaluation so callers can reuse
+        # them without an extra sumFanddM call at the converged point.
+        _last = [None]
+
         def residual(x):
-            aoa = float(x[0])
-            trim = float(x[1])
-
-            self.aoa = aoa
-            self.trim = trim
-
+            self.aoa  = float(x[0])
+            self.trim = float(x[1])
             mf = self.sumFanddM(res=res)
-            lres = float(mf[1] - self.weight)
-            mres = float(mf[2])
-            return np.array([lres, mres], dtype=float)
+            _last[0] = mf
+            return np.array([float(mf[1] - self.weight), float(mf[2])], dtype=float)
 
         sol = scipy.optimize.root(residual, x0=np.array([alpha0, de0], dtype=float), method="hybr")
         if not sol.success:
-            return [None, None]
-        self.trim = sol.x[1]
-        self.aoa = sol.x[0]
-        
-        return [self.aoa, self.trim]
- 
+            return ([None, None], None) if _return_forces else [None, None]
+
+        self.trim = float(sol.x[1])
+        self.aoa  = float(sol.x[0])
+
+        if not _return_forces:
+            return [self.aoa, self.trim]
+
+        # hybr's last residual call is at sol.x; reuse cached forces when possible
+        if (_last[0] is not None
+                and abs(self.aoa  - float(sol.x[0])) < 1e-12
+                and abs(self.trim - float(sol.x[1])) < 1e-12):
+            forces = _last[0]
+        else:
+            forces = self.sumFanddM(res=res)
+        return [self.aoa, self.trim], forces
+
     def solveBestVelocity(self, levelFlightMargin, vguess=20, res=100, mode="optimal"):
         stall = self.mwing.stallSpeed(self.altitude, self.weight, v0=vguess)[0]
         vmin = float(stall * levelFlightMargin)
@@ -362,9 +438,7 @@ class Aircraft:
 
         def power(v):
             best = best_trimmed_solution(v)
-            if best is None:
-                return float("inf")
-            return float(best[0])
+            return float("inf") if best is None else float(best[0])
 
         if mode_norm == "stall_margin":
             selected_velocity = vmin
@@ -381,16 +455,13 @@ class Aircraft:
                 right = float(sweep_v[min(best_idx + 1, sweep_v.size - 1)])
                 if right - left > 1e-6:
                     opt_result = scipy.optimize.minimize_scalar(
-                        power,
-                        bounds=(left, right),
-                        method="bounded",
+                        power, bounds=(left, right), method="bounded",
                         options={"xatol": 0.05},
                     )
                     if opt_result.success:
                         candidate_velocity = float(opt_result.x)
                         candidate_power = power(candidate_velocity)
-                        baseline_power = power(selected_velocity)
-                        if np.isfinite(candidate_power) and candidate_power <= baseline_power:
+                        if np.isfinite(candidate_power) and candidate_power <= power(selected_velocity):
                             selected_velocity = candidate_velocity
         else:
             raise ValueError(f"Unsupported cruise speed mode '{mode}'. Use 'optimal' or 'stall_margin'.")
@@ -398,7 +469,6 @@ class Aircraft:
         self.velocity = float(selected_velocity)
         best_final = best_trimmed_solution(self.velocity)
         if best_final is None:
-            self.velocity = float(selected_velocity)
             self.thrust = float("inf")
             self.power = float("inf")
             self.aoa = reference_state[1]
@@ -408,7 +478,8 @@ class Aircraft:
         self.thrust = float(best_final[1])
         self.aoa = float(best_final[2])
         self.trim = float(best_final[3])
-        if(self.power>self.pplant.pmax): print("WARNING: aircraft power exceeds peak power plant power")
+        if self.power > self.pplant.pmax:
+            print("WARNING: aircraft power exceeds peak power plant power")
         return [float(self.velocity), self.power, self.thrust]
 
     def cm_alpha(self, dalpha=0.25):
@@ -423,8 +494,7 @@ class Aircraft:
         rho = Atmosphere(self.altitude).density[0]
         qS = 0.5 * rho * self.velocity**2 * self.mwing.area
         cbar = self.mwing.mac
-        Cm_alpha = (m_p - m_m) / (2*dalpha) / (qS * cbar)
-        return Cm_alpha
+        return (m_p - m_m) / (2 * dalpha) / (qS * cbar)
 
     def cl_alpha(self, dalpha=0.25):
         aoa0 = self.aoa
@@ -437,13 +507,10 @@ class Aircraft:
         self.trim = trim0
         rho = Atmosphere(self.altitude).density[0]
         qS = 0.5 * rho * self.velocity**2 * self.mwing.area
-        CL_alpha = (L_p - L_m) / (2*dalpha) / qS
-        return CL_alpha
+        return (L_p - L_m) / (2 * dalpha) / qS
 
     def staticMargin(self):
-        Cm_a = self.cm_alpha()
-        CL_a = self.cl_alpha()
-        return -Cm_a / CL_a
+        return -self.cm_alpha() / self.cl_alpha()
 
     def horizontalTailVolume(self, xhtqc):
         return (self.hwing.area * (xhtqc - self.xcg)) / (self.mwing.area * self.mwing.mac)
@@ -452,37 +519,29 @@ class Aircraft:
         return (self.vtail.area * (xvtqc - self.xcg)) / (self.mwing.area * self.mwing.span)
 
 
+# --- Design-point configuration ---
+altitude          = 200
+wingFoil          = PolarSet.from_folder("./PyFoil/polars", airfoil="psu94097")
+tailFoil          = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
+arealDensityMain  = 3.05   # kg/m^2
+arealDensityH     = 1.5    # kg/m^2
+arealDensityV     = 1.5    # kg/m^2
+baseMass          = 17.5   # kg
+boomMassFixed     = 0.0    # kg
+boomLengthMin     = 0.05   # m
+cdomisc           = 0.015
+xcg               = 0.35
+boomMassPerM      = 0.4
 
-import math
-import numpy as np
-import scipy.optimize
-
-G = 9.80665
-
-
-# --- Design-point configuration used by trade studies and scripts ---
-altitude = 200
-wingFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="dae21")
-tailFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
-arealDensityMain = 3.05  # kg/m^2
-arealDensityH = 1.5  # kg/m^2
-arealDensityV = 1.5  # kg/m^2
-baseMass = 17.5  # kg
-boomMassFixed = 0.0  # kg
-boomLengthMin = 0.05  # m
-cdomisc = 0.015
-xcg = 0.35
-boomMassPerM = 0.4
-
-body = Fuselage(1.0541, 0.3048, 0.21336, 0.9, 0.00635e-3, 0.3)
-booms = Fuselage(1.4, 0.03, 0.03, 1, 0.00635e-3, 0.05)
-batteryElectric = Powerplant(7992000, 0.59, 4000)
-fuselages = [body, booms, booms]
+body             = Fuselage(1.0541, 0.3048, 0.21336, 0.9, 0.00635e-3, 0.3)
+booms            = Fuselage(1.4, 0.03, 0.03, 1, 0.00635e-3, 0.05)
+batteryElectric  = Powerplant(7992000, 0.59, 4000)
+fuselages        = [body, booms, booms]
 
 design_point = x = [
     4.4914820,  # wingSpan (m)   = 176.830 in
     0.2614676,  # wingChord (m)  = 10.294 in
-    0.2811526,  # xwqc (m)       = 11.069 in
+    0.3048,  # xwqc (m)       = 12.00 in
     0.8067548,  # hSpan (m)      = 31.762 in
     0.1953260,  # hChord (m)     = 7.690 in
     1.5046198,  # xhtqc (m)      = 59.237 in
@@ -491,7 +550,7 @@ design_point = x = [
 ]
 default_wing_incidence = 1.964
 default_tail_incidence = -0.1864
-default_vtail_volume = 0.03
+default_vtail_volume   = 0.03
 
 
 def _vtail_from_volume(wing_span, wing_chord, xhtqc, vtail_volume, xcg_value=None):
@@ -508,8 +567,8 @@ def _vtail_from_volume(wing_span, wing_chord, xhtqc, vtail_volume, xcg_value=Non
 
 
 def _normalize_design_point(dp):
-    wing_inc = default_wing_incidence
-    tail_inc = default_tail_incidence
+    wing_inc     = default_wing_incidence
+    tail_inc     = default_tail_incidence
     vtail_volume = default_vtail_volume
 
     if isinstance(dp, dict):
@@ -523,21 +582,24 @@ def _normalize_design_point(dp):
             if "tailIncidence" in dp:
                 tail_inc = float(dp["tailIncidence"])
             if all(k in dp for k in ("wingSpan", "wingChord", "xwqc", "hSpan", "hChord", "xhtqc")):
-                wing_span = float(dp["wingSpan"])
+                wing_span  = float(dp["wingSpan"])
                 wing_chord = float(dp["wingChord"])
-                xwqc = float(dp["xwqc"])
-                h_span = float(dp["hSpan"])
-                h_chord = float(dp["hChord"])
-                xhtqc = float(dp["xhtqc"])
-                return [wing_span, wing_chord, xwqc, h_span, h_chord, xhtqc, wing_inc, tail_inc], wing_inc, tail_inc, vtail_volume
+                xwqc       = float(dp["xwqc"])
+                h_span     = float(dp["hSpan"])
+                h_chord    = float(dp["hChord"])
+                xhtqc      = float(dp["xhtqc"])
+                return ([wing_span, wing_chord, xwqc, h_span, h_chord, xhtqc, wing_inc, tail_inc],
+                        wing_inc, tail_inc, vtail_volume)
 
     arr = np.asarray(dp, dtype=float).reshape(-1)
     if arr.size >= 8:
         wing_span, wing_chord, xwqc, h_span, h_chord, xhtqc, wing_inc, tail_inc = map(float, arr[:8])
-        return [wing_span, wing_chord, xwqc, h_span, h_chord, xhtqc, wing_inc, tail_inc], wing_inc, tail_inc, vtail_volume
+        return ([wing_span, wing_chord, xwqc, h_span, h_chord, xhtqc, wing_inc, tail_inc],
+                wing_inc, tail_inc, vtail_volume)
     if arr.size == 6:
         wing_span, wing_chord, xwqc, h_span, h_chord, xhtqc = map(float, arr[:6])
-        return [wing_span, wing_chord, xwqc, h_span, h_chord, xhtqc, wing_inc, tail_inc], wing_inc, tail_inc, vtail_volume
+        return ([wing_span, wing_chord, xwqc, h_span, h_chord, xhtqc, wing_inc, tail_inc],
+                wing_inc, tail_inc, vtail_volume)
 
     raise ValueError("design point must contain at least 6 values")
 
@@ -552,107 +614,61 @@ design_point, wing_incidence, tail_incidence = _coerce_design_point(design_point
 
 def build_aircraft(x):
     x, wingIncidence, tailIncidence, vtailVolume = _normalize_design_point(x)
-    wingSpan = float(x[0])
-    wingChord = float(x[1])
-    xwqc = float(x[2])
-
-    hSpan = float(x[3])
-    hChord = float(x[4])
-    xhtqc = float(x[5])
-
+    wingSpan      = float(x[0])
+    wingChord     = float(x[1])
+    xwqc          = float(x[2])
+    hSpan         = float(x[3])
+    hChord        = float(x[4])
+    xhtqc         = float(x[5])
     wingIncidence = float(x[6])
     tailIncidence = float(x[7])
-    xvtqc = xhtqc
+    xvtqc         = xhtqc
     vHeight, vChord = _vtail_from_volume(wingSpan, wingChord, xhtqc, vtailVolume)
 
     mainWing = Wing(
-        wingFoil,
-        altitude,
-        0.0,
-        wingSpan,
-        wingChord,
-        wingChord,
-        wingChord,
-        0.5,
-        0.0,
-        0.0,
-        0.0,
-        0.5,
-        0.0,
-        0.0,
-        True,
-        xwqc,
-        0.0,
-        arealDensityMain,
+        wingFoil, altitude, 0.0,
+        wingSpan, wingChord, wingChord, wingChord, 0.5,
+        0.0, 0.0, 0.0, 0.5,
+        0.0, 0.0, True,
+        xwqc, 0.0, arealDensityMain,
     )
 
     hwing = HorizontalTail(
-        tailFoil,
-        altitude,
-        0.0,
-        hSpan,
-        hChord,
-        hChord,
-        hChord,
-        0.5,
-        0.0,
-        0.0,
-        0.0,
-        0.5,
-        0.0,
-        0.0,
-        True,
-        xhtqc,
-        0.0,
-        arealDensityH,
+        tailFoil, altitude, 0.0,
+        hSpan, hChord, hChord, hChord, 0.5,
+        0.0, 0.0, 0.0, 0.5,
+        0.0, 0.0, True,
+        xhtqc, 0.0, arealDensityH,
         elevatorDeflection=0.0,
         elevatorTau=0.35,
         cd_deltae_k=0.0,
     )
 
     vwing = VerticalTail(
-        tailFoil,
-        altitude,
-        0.0,
-        vHeight,
-        vChord,
-        vChord,
-        vChord,
-        0.5,
-        0.0,
-        0.0,
-        0.0,
-        0.5,
-        0.0,
-        0.0,
-        xvtqc,
-        0.0,
-        arealDensityV,
+        tailFoil, altitude, 0.0,
+        vHeight, vChord, vChord, vChord, 0.5,
+        0.0, 0.0, 0.0, 0.5,
+        0.0, 0.0,
+        xvtqc, 0.0, arealDensityV,
         eta=2.0,
     )
 
-    hwing.incidence = tailIncidence
+    hwing.incidence    = tailIncidence
     mainWing.incidence = wingIncidence
 
     boomLength = max(float(xhtqc - xwqc), float(boomLengthMin))
-    boomMass = float(boomMassFixed) + float(boomMassPerM) * float(boomLength)
+    boomMass   = float(boomMassFixed) + float(boomMassPerM) * float(boomLength)
     fuselages_local = []
     for f in fuselages:
-        if (
-            isinstance(f, Fuselage)
-            and getattr(f, "width", None) is not None
-            and getattr(f, "height", None) is not None
-        ):
+        if (isinstance(f, Fuselage)
+                and getattr(f, "width", None) is not None
+                and getattr(f, "height", None) is not None):
             if float(getattr(f, "width")) <= 0.05 and float(getattr(f, "height")) <= 0.05:
                 fnew = Fuselage(
                     boomLength,
-                    float(f.width),
-                    float(f.height),
-                    float(f.pfactor),
-                    float(f.roughness),
-                    float(f.laminarfraction),
-                    float(getattr(f, "qfactor", 1.0)),
-                    int(getattr(f, "quantity", 1)),
+                    float(f.width), float(f.height),
+                    float(f.pfactor), float(f.roughness), float(f.laminarfraction),
+                    float(getattr(f, "qfactor", 1.0)), int(getattr(f, "quantity", 1)),
                 )
                 fuselages_local.append(fnew)
             else:
@@ -660,254 +676,110 @@ def build_aircraft(x):
         else:
             fuselages_local.append(f)
 
-    totalMass = (
-        float(baseMass)
-        + float(mainWing.mass)
-        + float(hwing.mass)
-        + float(vwing.mass)
-        + float(boomMass)
-    )
+    totalMass = (float(baseMass) + float(mainWing.mass) + float(hwing.mass)
+                 + float(vwing.mass) + float(boomMass))
     weight = totalMass * G
 
     commsNode = Aircraft(
-        altitude,
-        20.0,
-        batteryElectric,
-        mainWing,
-        hwing,
-        vwing,
-        fuselages_local,
-        0.0,
-        0.0,
-        xcg,
-        weight,
-        cdomisc,
+        altitude, 20.0, batteryElectric,
+        mainWing, hwing, vwing, fuselages_local,
+        0.0, 0.0, xcg, weight, cdomisc,
     )
-
     return commsNode, totalMass
 
 
-KNOTS_PER_MPS = 1.9438444924406
+# --- Mission parameters ---
 mission_systems_power_w = 50.0
-landing_margin = 0.20
-battery_capacity_wh = 2220.0
+landing_margin          = 0.20
+battery_capacity_wh     = 2220.0
+
+
+# --- Analysis helpers ---
+
+def evaluate_ld_at_speed(aircraft, target_velocity):
+    saved_state = (aircraft.velocity, aircraft.aoa, aircraft.trim)
+    aircraft.velocity = float(target_velocity)
+    ld = float("nan")
+    try:
+        sol = aircraft.solveTrim()
+        if sol != [None, None]:
+            forces = aircraft.sumFanddM()
+            if forces[0]:
+                ld = forces[1] / forces[0]
+    except Exception:
+        pass
+    finally:
+        aircraft.velocity, aircraft.aoa, aircraft.trim = saved_state
+    return ld
+
+
+def drag_polar_at_speed(aircraft, speed, aoa_samples, trim_guess=None, retrim=False):
+    saved_state = (aircraft.velocity, aircraft.aoa, aircraft.trim)
+    aircraft.velocity = float(speed)
+    if trim_guess is None:
+        trim_guess = saved_state[2]
+    trim_guess = float(trim_guess)
+    aircraft.trim = trim_guess
+    results = []
+    for aoa in aoa_samples:
+        aircraft.aoa = float(aoa)
+        try:
+            if retrim:
+                def moment_sq(t):
+                    aircraft.trim = float(t)
+                    m = aircraft.sumFanddM()[2]
+                    return m * m
+                res = scipy.optimize.minimize_scalar(
+                    moment_sq, bounds=(-10.0, 10.0), method="bounded",
+                    options={"xatol": 0.05},
+                )
+                aircraft.trim = float(res.x)
+            else:
+                aircraft.trim = trim_guess
+            forces = aircraft.sumFanddM()
+            results.append((float(aoa), float(aircraft.trim), float(forces[0]), float(forces[1])))
+        except Exception:
+            results.append((float(aoa), float("nan"), float("nan"), float("nan")))
+    aircraft.velocity, aircraft.aoa, aircraft.trim = saved_state
+    return results
+
+
+def evaluate_endurance_at_speed(aircraft, target_velocity, mission_power_w, available_energy_wh, res=80):
+    saved_state = (aircraft.velocity, aircraft.aoa, aircraft.trim)
+    aircraft.velocity = float(target_velocity)
+    endurance_h = float("nan")
+    try:
+        sol = aircraft.solveTrim(res=res)
+        if sol != [None, None]:
+            drag_force     = float(aircraft.sumFanddM(res=res)[0])
+            pwr_propulsive = drag_force * float(aircraft.velocity)
+            if (np.isfinite(pwr_propulsive) and pwr_propulsive > 0.0
+                    and aircraft.pplant.neff > 0.0
+                    and pwr_propulsive <= aircraft.pplant.pmax):
+                total_power = (pwr_propulsive / aircraft.pplant.neff) + float(mission_power_w)
+                if np.isfinite(total_power) and total_power > 0.0:
+                    endurance_h = float(available_energy_wh) / total_power
+    except Exception:
+        pass
+    finally:
+        aircraft.velocity, aircraft.aoa, aircraft.trim = saved_state
+    return endurance_h
 
 
 def _run_design_point():
-    # Actual design point
-    
-    altitude = 200
-    bestDesignPoint = []
-    
-    wingFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="dae21")
-    tailFoil = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
-    arealDensityMain = 3.05  # kg/m^2
-    arealDensityH = 1.5  # kg/m^2
-    arealDensityV = 1.5  # kg/m^2
-    baseMass = 17.5  # kg
-    boomMassFixed = 0.0  # kg
-    boomLengthMin = 0.05  # m
-    cdomisc = 0.015
-    xcg = 0.35
-    boomMassPerM = 0.4
-    
-    body = Fuselage(1.0541, 0.3048, 0.21336, 0.9, 0.00635e-3, 0.3)
-    booms = Fuselage(1.4, .03, 0.03, 1, 0.00635e-3, 0.05)
-    batteryElectric = Powerplant(7992000, 0.59, 4000)
-    fuselages = [body, booms, booms]
-    
-    
-    def build_aircraft(x):
-        wingSpan = float(x[0])
-        wingChord = float(x[1])
-        xwqc = float(x[2])
-    
-        hSpan = float(x[3])
-        hChord = float(x[4])
-        xhtqc = float(x[5])
-    
-        wingIncidence = float(x[6])
-        tailIncidence = float(x[7])
-        xvtqc = xhtqc
-        if xvtqc <= xcg:
-            raise ValueError("xhtqc must be greater than xcg for vertical tail sizing")
-        vHeight, vChord = _vtail_from_volume(wingSpan, wingChord, xhtqc, default_vtail_volume)
-    
-        mainWing = Wing(
-            wingFoil, altitude, 0.0,
-            wingSpan,
-            wingChord, wingChord, wingChord, 0.5,
-            0.0, 0.0, 0.0, 0.5,
-            0.0, 0.0, True,
-            xwqc,
-            0.0,
-            arealDensityMain,
-        )
-    
-        hwing = HorizontalTail(
-            tailFoil, altitude, 0.0,
-            hSpan,
-            hChord, hChord, hChord, 0.5,
-            0.0, 0.0, 0.0, 0.5,
-            0.0, 0.0, True,
-            xhtqc,
-            0.0,
-            arealDensityH,
-            elevatorDeflection=0.0,
-            elevatorTau=0.35,
-            cd_deltae_k=0.0,
-        )
-    
-        vwing = VerticalTail(
-            tailFoil, altitude, 0.0,
-            vHeight,
-            vChord, vChord, vChord, 0.5,
-            0.0, 0.0, 0.0, 0.5,
-            0.0, 0.0,
-            xvtqc,
-            0.0,
-            arealDensityV,
-            eta=2.0,
-        )
-
-        hwing.incidence = tailIncidence
-        mainWing.incidence = wingIncidence
-    
-        boomLength = max(float(xhtqc - xwqc), float(boomLengthMin))
-        boomMass = float(boomMassFixed) + float(boomMassPerM) * float(boomLength)
-        fuselages_local = []
-        for f in fuselages:
-            if isinstance(f, Fuselage) and getattr(f, "width", None) is not None and getattr(f, "height", None) is not None:
-                if float(getattr(f, "width")) <= 0.05 and float(getattr(f, "height")) <= 0.05:
-                    fnew = Fuselage(
-                        boomLength,
-                        float(f.width),
-                        float(f.height),
-                        float(f.pfactor),
-                        float(f.roughness),
-                        float(f.laminarfraction),
-                        float(getattr(f, "qfactor", 1.0)),
-                        int(getattr(f, "quantity", 1)),
-                    )
-                    fuselages_local.append(fnew)
-                else:
-                    fuselages_local.append(f)
-            else:
-                fuselages_local.append(f)
-    
-        totalMass = float(baseMass) + float(mainWing.mass) + float(hwing.mass) + float(vwing.mass) + float(boomMass)
-        weight = totalMass * G
-    
-        commsNode = Aircraft(
-            altitude,
-            20.0,
-            batteryElectric,
-            mainWing,
-            hwing,
-            vwing,
-            fuselages_local,
-            0.0,
-            0.0,
-            xcg,
-            weight,
-            cdomisc,
-        )
-    
-        return commsNode, totalMass
-    
-    def evaluate_ld_at_speed(aircraft, target_velocity):
-        saved_state = (aircraft.velocity, aircraft.aoa, aircraft.trim)
-        aircraft.velocity = float(target_velocity)
-        ld = float("nan")
-        try:
-            sol = aircraft.solveTrim()
-            if sol != [None, None]:
-                forces_off = aircraft.sumFanddM()
-                drag_off = forces_off[0]
-                lift_off = forces_off[1]
-                if drag_off:
-                    ld = lift_off / drag_off
-        except Exception:
-            pass
-        finally:
-            aircraft.velocity, aircraft.aoa, aircraft.trim = saved_state
-        return ld
-    
-    def drag_polar_at_speed(aircraft, speed, aoa_samples, trim_guess=None, retrim=False):
-        saved_state = (aircraft.velocity, aircraft.aoa, aircraft.trim)
-        aircraft.velocity = float(speed)
-        if trim_guess is None:
-            trim_guess = saved_state[2]
-        trim_guess = float(trim_guess)
-        aircraft.trim = trim_guess
-        results = []
-        for aoa in aoa_samples:
-            aircraft.aoa = float(aoa)
-            try:
-                if retrim:
-                    def moment_sq(t):
-                        aircraft.trim = float(t)
-                        m = aircraft.sumFanddM()[2]
-                        return m * m
-                    res = scipy.optimize.minimize_scalar(
-                        moment_sq,
-                        bounds=(-10.0, 10.0),
-                        method="bounded",
-                        options={"xatol": 0.05},
-                    )
-                    aircraft.trim = float(res.x)
-                else:
-                    aircraft.trim = trim_guess
-                forces = aircraft.sumFanddM()
-                results.append((float(aoa), float(aircraft.trim), float(forces[0]), float(forces[1])))
-            except Exception:
-                results.append((float(aoa), float("nan"), float("nan"), float("nan")))
-        aircraft.velocity, aircraft.aoa, aircraft.trim = saved_state
-        return results
-
-    def evaluate_endurance_at_speed(
-        aircraft,
-        target_velocity,
-        mission_power_w,
-        available_energy_wh,
-        res=80,
-    ):
-        saved_state = (aircraft.velocity, aircraft.aoa, aircraft.trim)
-        aircraft.velocity = float(target_velocity)
-        endurance_h = float("nan")
-        try:
-            sol = aircraft.solveTrim(res=res)
-            if sol != [None, None]:
-                drag_force = float(aircraft.sumFanddM(res=res)[0])
-                pwr_propulsive = drag_force * float(aircraft.velocity)
-                if (
-                    np.isfinite(pwr_propulsive)
-                    and pwr_propulsive > 0.0
-                    and aircraft.pplant.neff > 0.0
-                    and pwr_propulsive <= aircraft.pplant.pmax
-                ):
-                    total_power = (pwr_propulsive / aircraft.pplant.neff) + float(mission_power_w)
-                    if np.isfinite(total_power) and total_power > 0.0:
-                        endurance_h = float(available_energy_wh) / total_power
-        except Exception:
-            pass
-        finally:
-            aircraft.velocity, aircraft.aoa, aircraft.trim = saved_state
-        return endurance_h
-    
     # Cruise speed selection:
     #   "optimal"      -> minimize required propulsive power above stall margin
     #   "stall_margin" -> use exactly (cruise_stall_margin * Vstall)
     cruise_velocity_mode = "stall_margin"
-    cruise_stall_margin = 1.25
-    plots = False
+    cruise_stall_margin  = 1.25
+    plots            = False
     plot_ld_vs_alpha = True
     plot_cl_cd_polar = True
 
     # Required stall margins (V / Vs)
-    stall_margin_takeoff_v2_req = 1.20
-    stall_margin_takeoff_climb_req = 1.25
-    stall_margin_level_flight_req = 1.25
+    stall_margin_takeoff_v2_req       = 1.20
+    stall_margin_takeoff_climb_req    = 1.25
+    stall_margin_level_flight_req     = 1.25
     stall_margin_landing_approach_req = 1.30
 
     epicairplane = build_aircraft(design_point)[0]
@@ -915,63 +787,48 @@ def _run_design_point():
         cruise_stall_margin,
         mode=cruise_velocity_mode,
     )
-    
+
     forces = epicairplane.sumFanddM()
     drag, lift, moment = forces[0], forces[1], forces[2]
     rho = Atmosphere(altitude).density[0]
-    q = 0.5 * rho * vbest**2
+    q   = 0.5 * rho * vbest**2
     cruise_cl = lift / (q * epicairplane.mwing.area) if q > 0 else float("nan")
     moment_coefficient = (
         moment / (q * epicairplane.mwing.area * epicairplane.mwing.mac)
-        if q > 0 and epicairplane.mwing.mac > 0
-        else float("nan")
+        if q > 0 and epicairplane.mwing.mac > 0 else float("nan")
     )
     stall_speed, clmax, stall_aoa = epicairplane.mwing.stallCondition(
-        epicairplane.altitude,
-        epicairplane.weight,
-        v0=vbest,
+        epicairplane.altitude, epicairplane.weight, v0=vbest,
     )
-    power_available = epicairplane.pplant.pmax
+    power_available       = epicairplane.pplant.pmax
     propulsive_power_elec = (
         pwr / epicairplane.pplant.neff if epicairplane.pplant.neff > 0 else float("inf")
     )
-    excess_power = power_available - pwr
+    excess_power   = power_available - pwr
     power_fraction = pwr / power_available if power_available else float("nan")
-    static_margin = epicairplane.staticMargin()
-    cm_alpha = epicairplane.cm_alpha()
-    cl_alpha = epicairplane.cl_alpha()
-    h_tail_volume = epicairplane.horizontalTailVolume(design_point[5])
-    v_tail_volume = epicairplane.verticalTailVolume(design_point[5])
-    
-    KNOTS_PER_MPS = 1.9438444924406
-    LBF_PER_NEWTON = 0.2248089431
-    IN_PER_M = 39.37007874015748
-    LB_PER_KG = 2.2046226218487757
-    IN2_PER_M2 = IN_PER_M * IN_PER_M
-    LB_PER_IN2_PER_KG_PER_M2 = LB_PER_KG / IN2_PER_M2
-    MI_PER_NM = 1.1507794480235425
-    mission_systems_power_w = 50.0
-    landing_margin = 0.20
-    battery_capacity_wh = 2220.0
-    
-    v_knots = vbest * KNOTS_PER_MPS
+    static_margin  = epicairplane.staticMargin()
+    cm_alpha       = epicairplane.cm_alpha()
+    cl_alpha       = epicairplane.cl_alpha()
+    h_tail_volume  = epicairplane.horizontalTailVolume(design_point[5])
+    v_tail_volume  = epicairplane.verticalTailVolume(design_point[5])
+
+    v_knots     = vbest * KNOTS_PER_MPS
     stall_knots = stall_speed * KNOTS_PER_MPS
-    drag_lbf = drag * LBF_PER_NEWTON
-    lift_lbf = lift * LBF_PER_NEWTON
-    thrust_lbf = thrust * LBF_PER_NEWTON
+    drag_lbf    = drag * LBF_PER_NEWTON
+    lift_lbf    = lift * LBF_PER_NEWTON
+    thrust_lbf  = thrust * LBF_PER_NEWTON
     propulsive_power_fraction = propulsive_power_elec / power_available if power_available else float("nan")
-    total_power_w = propulsive_power_elec + mission_systems_power_w
+    total_power_w       = propulsive_power_elec + mission_systems_power_w
     available_energy_wh = battery_capacity_wh * (1.0 - landing_margin)
-    flight_time_h = available_energy_wh / total_power_w if total_power_w > 0.0 else 0.0
-    flight_time_min = flight_time_h * 60.0
-    flight_distance_nm = flight_time_h * v_knots
-    flight_distance_mi = flight_distance_nm * MI_PER_NM
-    climb_rate_mps = excess_power / epicairplane.weight
-    FT_PER_MIN_PER_MPS = 196.850394
-    climb_rate_fpm = climb_rate_mps * FT_PER_MIN_PER_MPS
-    ld_at_90 = evaluate_ld_at_speed(epicairplane, vbest * 0.9)
+    flight_time_h       = available_energy_wh / total_power_w if total_power_w > 0.0 else 0.0
+    flight_time_min     = flight_time_h * 60.0
+    flight_distance_nm  = flight_time_h * v_knots
+    flight_distance_mi  = flight_distance_nm * MI_PER_NM
+    climb_rate_mps      = excess_power / epicairplane.weight
+    climb_rate_fpm      = climb_rate_mps * FT_PER_MIN_PER_MPS
+    ld_at_90  = evaluate_ld_at_speed(epicairplane, vbest * 0.9)
     ld_at_110 = evaluate_ld_at_speed(epicairplane, vbest * 1.1)
-    
+
     print("Cruise summary:")
     print(f"  Velocity: {v_knots:.1f} kt")
     print(f"  Stall speed: {stall_knots:.1f} kt, Cl_max: {clmax:.3f}, Stall AoA: {stall_aoa:.3f} deg")
@@ -989,7 +846,7 @@ def _run_design_point():
     print("Off-design L/D:")
     print(f"  90% cruise ({0.9*v_knots:.1f} kt): {ld_at_90:.3f}")
     print(f"  110% cruise ({1.1*v_knots:.1f} kt): {ld_at_110:.3f}")
-    print(f"Endurance:")
+    print("Endurance:")
     print(f"  Power including mission systems: {total_power_w:.2f} W")
     print(f"  Battery energy payload: {available_energy_wh:.1f} Wh (from {battery_capacity_wh:.0f} Wh capacity)")
     print(f"  Flight time: {flight_time_h:.2f} h ({flight_time_min:.0f} min)")
@@ -998,7 +855,7 @@ def _run_design_point():
     print(f"  Static margin: {static_margin:.3f}, Cm_alpha: {cm_alpha:.3f}, Cl_alpha: {cl_alpha:.3f}")
     print(f"  Horizontal tail volume: {h_tail_volume:.3f}, Vertical tail volume: {v_tail_volume:.3f}")
     print(f"  Moment coefficient (cruise): {moment_coefficient:.4f}")
-    
+
     print("Design parameters:")
     print(f"  CG x-position: {epicairplane.xcg * IN_PER_M:.3f} in")
     mw = epicairplane.mwing
@@ -1008,7 +865,7 @@ def _run_design_point():
     print(f"  Sweeps (root/mid/tip): {mw.rootSweep:.3f} / {mw.midSweep:.3f} / {mw.tipSweep:.3f} deg, Mid-sweep position: {mw.midSweepPosition:.3f}")
     print(f"  Incidence: {mw.incidence:.3f} deg, xqc: {mw.xqc * IN_PER_M:.3f} in, Symmetric: {mw.symmetric}, Areal density: {mw.arealDensity * LB_PER_IN2_PER_KG_PER_M2:.3f} lb/in^2")
     print(f"  Mass: {mw.mass * LB_PER_KG:.3f} lb, Oswald e: {mw.e_oswald_w:.3f}")
-    
+
     hw = epicairplane.hwing
     if hw is not None:
         print("Horizontal tail:")
@@ -1018,7 +875,7 @@ def _run_design_point():
         print(f"  Incidence: {hw.incidence:.3f} deg, xqc: {hw.xqc * IN_PER_M:.3f} in, Symmetric: {hw.symmetric}, Areal density: {hw.arealDensity * LB_PER_IN2_PER_KG_PER_M2:.3f} lb/in^2")
         print(f"  Mass: {hw.mass * LB_PER_KG:.3f} lb, Oswald e: {hw.e_oswald_w:.3f}")
         print(f"  Elevator deflection: {hw.elevatorDeflection:.3f} deg, Elevator tau: {hw.elevatorTau:.3f}, CD delta-e k: {hw.cd_deltae_k:.3f}")
-    
+
     vw = epicairplane.vtail
     if vw is not None:
         v_height = vw.span * 0.5
@@ -1028,7 +885,7 @@ def _run_design_point():
         print(f"  Sweeps (root/mid/tip): {vw.rootSweep:.3f} / {vw.midSweep:.3f} / {vw.tipSweep:.3f} deg, Mid-sweep position: {vw.midSweepPosition:.3f}")
         print(f"  Incidence: {vw.incidence:.3f} deg, xqc: {vw.xqc * IN_PER_M:.3f} in, Symmetric: {vw.symmetric}, Areal density: {vw.arealDensity * LB_PER_IN2_PER_KG_PER_M2:.3f} lb/in^2")
         print(f"  Mass: {vw.mass * LB_PER_KG:.3f} lb, Oswald e: {vw.e_oswald_w:.3f}, Eta: {vw.eta:.3f}")
-    
+
     print("Fuselages:")
     for i, f in enumerate(epicairplane.fuselages, 1):
         print(
@@ -1036,24 +893,22 @@ def _run_design_point():
             f"P-factor {f.pfactor:.3f}, Roughness {f.roughness:.6g}, Laminar frac {f.laminarfraction:.3f}, "
             f"Q-factor {f.qfactor:.3f}, Quantity {f.quantity}"
         )
-    
+
     bank_angle_summary_deg = 18.0
-    bank_cos = math.cos(math.radians(bank_angle_summary_deg))
-    bank_load_factor = 1.0 / bank_cos if bank_cos > 0.0 else float("inf")
-    bank_speed_scale = math.sqrt(bank_load_factor) if bank_load_factor > 0.0 else float("inf")
-    bank_stall_speed = stall_speed * bank_speed_scale
-    bank_cruise_speed = vbest * bank_speed_scale
+    bank_cos           = math.cos(math.radians(bank_angle_summary_deg))
+    bank_load_factor   = 1.0 / bank_cos if bank_cos > 0.0 else float("inf")
+    bank_speed_scale   = math.sqrt(bank_load_factor) if bank_load_factor > 0.0 else float("inf")
+    bank_stall_speed   = stall_speed * bank_speed_scale
+    bank_cruise_speed  = vbest * bank_speed_scale
     bank_propulsive_power = pwr * (bank_load_factor ** 1.5)
-    bank_propulsive_elec = (
+    bank_propulsive_elec  = (
         bank_propulsive_power / epicairplane.pplant.neff
-        if epicairplane.pplant.neff > 0.0
-        else float("inf")
+        if epicairplane.pplant.neff > 0.0 else float("inf")
     )
     bank_total_power_w = bank_propulsive_elec + mission_systems_power_w
-    bank_endurance_h = (
+    bank_endurance_h   = (
         available_energy_wh / bank_total_power_w
-        if np.isfinite(bank_total_power_w) and bank_total_power_w > 0.0
-        else 0.0
+        if np.isfinite(bank_total_power_w) and bank_total_power_w > 0.0 else 0.0
     )
     bank_range_nm = bank_endurance_h * (bank_cruise_speed * KNOTS_PER_MPS)
     print(f"Banked-flight summary ({bank_angle_summary_deg:.0f} deg):")
@@ -1063,21 +918,17 @@ def _run_design_point():
     print(f"  Power including mission systems: {bank_total_power_w:.2f} W")
     print(f"  Endurance: {bank_endurance_h:.2f} h")
     print(f"  Range: {bank_range_nm:.1f} nm")
-    
-    # calculate system CER using banked-turn endurance
+
+    # Calculate system CER using banked-turn endurance
     endurance_for_scoring_h = bank_endurance_h
-    AFcer = 150 * 6
-    MOTORcer = 250 * 1.5
-    FUELcer = 100 * 16
+    AFcer     = 150 * 6
+    MOTORcer  = 250 * 1.5
+    FUELcer   = 100 * 16
     SensorCER = 250 * 0.02
-    Gccer = 200 * endurance_for_scoring_h * 3
-    SysCER = AFcer + MOTORcer + FUELcer + SensorCER + Gccer
-    # TPMS
-    TPMcret = min(1, (endurance_for_scoring_h - 3)/(3))
-    
-    
-    # SE
-    SE = (0.34 * TPMcret)/(SysCER/1000)
+    Gccer     = 200 * endurance_for_scoring_h * 3
+    SysCER    = AFcer + MOTORcer + FUELcer + SensorCER + Gccer
+    TPMcret   = min(1, (endurance_for_scoring_h - 3) / 3)
+    SE        = (0.34 * TPMcret) / (SysCER / 1000)
     print("SE score:", SE)
     print("TMPEcret:", TPMcret)
     print("SysCER:", SysCER)
@@ -1087,31 +938,16 @@ def _run_design_point():
         sweep_vmax = max(2.0 * stall_speed, 1.3 * vbest, sweep_vmin + 0.5)
         sweep_speeds_mps = np.linspace(sweep_vmin, sweep_vmax, 50)
         sweep_endurance_h = np.array([
-            evaluate_endurance_at_speed(
-                epicairplane,
-                v,
-                mission_systems_power_w,
-                available_energy_wh,
-                res=60,
-            )
+            evaluate_endurance_at_speed(epicairplane, v, mission_systems_power_w, available_energy_wh, res=60)
             for v in sweep_speeds_mps
         ], dtype=float)
         valid = np.isfinite(sweep_endurance_h)
-
         if np.any(valid):
             plt.figure()
-            plt.plot(
-                sweep_speeds_mps[valid] * KNOTS_PER_MPS,
-                sweep_endurance_h[valid],
-                label="Trimmed endurance",
-            )
-            plt.scatter(
-                [v_knots],
-                [flight_time_h],
-                color="red",
-                zorder=3,
-                label=f"Selected cruise ({v_knots:.1f} kt)",
-            )
+            plt.plot(sweep_speeds_mps[valid] * KNOTS_PER_MPS, sweep_endurance_h[valid],
+                     label="Trimmed endurance")
+            plt.scatter([v_knots], [flight_time_h], color="red", zorder=3,
+                        label=f"Selected cruise ({v_knots:.1f} kt)")
             plt.xlabel("Cruise velocity (knots)")
             plt.ylabel("Endurance (hours)")
             plt.title("Endurance vs Cruise Velocity")
@@ -1120,92 +956,45 @@ def _run_design_point():
             plt.show()
         else:
             print("Endurance vs cruise velocity plot skipped: no valid trimmed points in sweep.")
-    
-    # simple Mission Envelope
-    bankAngle = 20 # degrees
-    velopt = v_knots * 0.514444 # m/s velocity at optimal cruise
-    velstallopt = stall_knots*0.514444 # m/s stall at optimal straight cruise
-    load_factor = 1/math.cos(math.radians(bankAngle))
-    bank_stall = velstallopt * math.sqrt(load_factor)
-    bank_vopt = velopt * math.sqrt(load_factor)
-    newpmin = pwr * math.pow(load_factor, 1.5)
-    truereq = (newpmin/epicairplane.pplant.neff) + mission_systems_power_w
-    newEndurance = (total_power_w/truereq) * flight_time_h
-    print(newEndurance)
-    print(bank_vopt/0.514444)
-    
-    # --- Constants ---
-    KNOT_TO_MPS = 0.514444
-    MPS_TO_KNOT = 1.0 / KNOT_TO_MPS
-    G_ACCEL = 9.80665  # m/s^2
-    M_TO_FT = 3.28084
-    
-    # --- Baseline (straight & level) in m/s ---
-    velopt0_mps    = v_knots * KNOT_TO_MPS
-    velstall0_mps  = stall_knots * KNOT_TO_MPS
-    
-    # --- Sweep bank angle ---
-    bank_angles_deg = np.linspace(0.0, 60.0, 241)  # 0 to 60 deg, 0.25-deg step
-    phi_rad = np.deg2rad(bank_angles_deg)
-    
-    load_factor = 1.0 / np.cos(phi_rad)                 # n = 1/cos(phi)
-    sqrt_n = np.sqrt(load_factor)
-    
-    # --- Speeds in bank ---
-    bank_vopt_mps  = velopt0_mps * sqrt_n
-    bank_stall_mps = velstall0_mps * sqrt_n
-    
-    # --- Power scaling (assuming pwr is straight-level P_min at Vopt0) ---
-    newpmin_w = pwr * (load_factor ** 1.5)
-    
-    # Total power draw (input power) including mission systems
-    truereq_w = (newpmin_w / epicairplane.pplant.neff) + mission_systems_power_w
-    
-    # --- Endurance scaling ---
-    # Option A (your original form): assumes total_power_w is the *baseline draw power* that produced flight_time_h
-    endurance_h = flight_time_h * (total_power_w / truereq_w)
-    
-    # --- Turn radii ---
+
+    # --- Bank-angle sweep (0-60 deg) ---
+    bank_angles_deg = np.linspace(0.0, 60.0, 241)
+    phi_rad         = np.deg2rad(bank_angles_deg)
+    load_factor     = 1.0 / np.cos(phi_rad)
+    sqrt_n          = np.sqrt(load_factor)
+    bank_vopt_mps   = vbest * sqrt_n
+    bank_stall_mps  = stall_speed * sqrt_n
+    newpmin_w       = pwr * (load_factor ** 1.5)
+    truereq_w       = (newpmin_w / epicairplane.pplant.neff) + mission_systems_power_w
+    endurance_h     = flight_time_h * (total_power_w / truereq_w)
+
     tan_phi = np.tan(phi_rad)
     eps = 1e-12
-    
     radius_vopt_m = np.divide(
-        bank_vopt_mps ** 2,
-        G_ACCEL * tan_phi,
+        bank_vopt_mps ** 2, G * tan_phi,
         out=np.full_like(tan_phi, np.inf, dtype=float),
         where=np.abs(tan_phi) > eps,
     )
-    
     stall_margin = 1.25
     bank_vstall_margin_mps = bank_stall_mps * stall_margin
     radius_vstall_margin_m = np.divide(
-        bank_vstall_margin_mps ** 2,
-        G_ACCEL * tan_phi,
+        bank_vstall_margin_mps ** 2, G * tan_phi,
         out=np.full_like(tan_phi, np.inf, dtype=float),
         where=np.abs(tan_phi) > eps,
     )
-    
-    # Convert to ft
-    radius_vopt_ft = radius_vopt_m * M_TO_FT
+    radius_vopt_ft          = radius_vopt_m * M_TO_FT
     radius_vstall_margin_ft = radius_vstall_margin_m * M_TO_FT
-    
-    # Crop "crazy" values (near-zero bank -> inf radius) and cap to plot max
+
     phi_min_deg = 2.0
-    cap_ft = 300.0
-    
-    mask = bank_angles_deg >= phi_min_deg
-    
-    radius_vopt_ft_plot = radius_vopt_ft.astype(float).copy()
+    cap_ft      = 300.0
+    mask        = bank_angles_deg >= phi_min_deg
+    radius_vopt_ft_plot          = radius_vopt_ft.astype(float).copy()
     radius_vstall_margin_ft_plot = radius_vstall_margin_ft.astype(float).copy()
-    
     for r in (radius_vopt_ft_plot, radius_vstall_margin_ft_plot):
         r[~np.isfinite(r)] = np.nan
-        r[~mask] = np.nan
-        r[r > cap_ft] = np.nan
-    
-    # =========================
-    # Plot 1: Endurance vs bank
-    # =========================
+        r[~mask]           = np.nan
+        r[r > cap_ft]      = np.nan
+
     if plots:
         plt.figure()
         plt.plot(bank_angles_deg, endurance_h, label="Endurance (using total_power_w)")
@@ -1215,10 +1004,7 @@ def _run_design_point():
         plt.grid(True)
         plt.legend()
         plt.show()
-    
-    # ======================
-    # Plot 2: Vopt vs bank
-    # ======================
+
     if plots:
         plt.figure()
         plt.plot(bank_angles_deg, bank_vopt_mps * MPS_TO_KNOT, label="Vopt (bank)")
@@ -1229,14 +1015,12 @@ def _run_design_point():
         plt.grid(True)
         plt.legend()
         plt.show()
-    
-    # ============================
-    # Plot 3: Orbit radius vs bank (ft) + overlay + cropped
-    # ============================
+
     if plots:
         plt.figure()
         plt.plot(bank_angles_deg, radius_vopt_ft_plot, label="Radius @ Vopt(bank)")
-        plt.plot(bank_angles_deg, radius_vstall_margin_ft_plot, linestyle="--", label=f"Radius @ {stall_margin:.2f}*Vstall(bank)")
+        plt.plot(bank_angles_deg, radius_vstall_margin_ft_plot, linestyle="--",
+                 label=f"Radius @ {stall_margin:.2f}*Vstall(bank)")
         plt.xlabel("Bank angle (deg)")
         plt.ylabel("Turn radius (ft)")
         plt.title("Orbit Radius vs Bank Angle (ft)")
@@ -1244,34 +1028,34 @@ def _run_design_point():
         plt.ylim(0, cap_ft)
         plt.legend()
         plt.show()
-    
-    
+
     mu_roll_takeoff = 0.05
     mu_roll_landing = 0.35
-    v_to = stall_speed * stall_margin_takeoff_v2_req
-    v_climb = stall_speed * stall_margin_takeoff_climb_req
+    v_to       = stall_speed * stall_margin_takeoff_v2_req
+    v_climb    = stall_speed * stall_margin_takeoff_climb_req
     v_approach = stall_speed * stall_margin_landing_approach_req
     # Assume flare from approach to touchdown speed before wheel rollout starts.
     approach_to_touchdown_factor = 1.0
     v_touchdown = v_approach * approach_to_touchdown_factor
     mass = epicairplane.weight / 9.81
     max_propulsive_power = epicairplane.pplant.pmax * epicairplane.pplant.neff
-    thrust_to = max_propulsive_power / max(v_to, 0.1) if max_propulsive_power > 0.0 else 0.0
-    cd_cruise = drag / (q * epicairplane.mwing.area) if q > 0.0 else 0.0
-    q_to = 0.5 * rho * v_to**2
-    d_to = q_to * epicairplane.mwing.area * cd_cruise
-    avg_drag = d_to / 3.0
+    thrust_to  = max_propulsive_power / max(v_to, 0.1) if max_propulsive_power > 0.0 else 0.0
+    cd_cruise  = drag / (q * epicairplane.mwing.area) if q > 0.0 else 0.0
+    q_to       = 0.5 * rho * v_to**2
+    d_to       = q_to * epicairplane.mwing.area * cd_cruise
+    avg_drag   = d_to / 3.0
     avg_friction = mu_roll_takeoff * (epicairplane.weight * (2.0 / 3.0))
-    accel = (thrust_to - avg_drag - avg_friction) / mass if mass > 0.0 else 0.0
+    accel      = (thrust_to - avg_drag - avg_friction) / mass if mass > 0.0 else 0.0
     ground_roll_m = v_to**2 / (2.0 * accel) if accel > 0.0 else float("inf")
+
     # Landing rollout model: simple drag + rolling friction, no control-surface effects.
-    landing_cd = max(0.0, cd_cruise)
-    landing_sref = epicairplane.mwing.area
-    landing_dt_s = 0.05
-    landing_t_max_s = 180.0
+    landing_cd                   = max(0.0, cd_cruise)
+    landing_sref                 = epicairplane.mwing.area
+    landing_dt_s                 = 0.05
+    landing_t_max_s              = 180.0
     landing_drag_update_period_s = 1.0
-    landing_next_drag_update_s = 0.0
-    v_roll = max(v_touchdown, 0.0)
+    landing_next_drag_update_s   = 0.0
+    v_roll         = max(v_touchdown, 0.0)
     landing_roll_m = 0.0
     landing_time_s = 0.0
     saved_landing_state = (epicairplane.velocity, epicairplane.aoa, epicairplane.trim)
@@ -1288,23 +1072,24 @@ def _run_design_point():
                 except Exception:
                     pass
                 landing_next_drag_update_s += landing_drag_update_period_s
-            q_roll = 0.5 * rho * v_roll**2
-            drag_roll = q_roll * landing_sref * landing_cd
+            q_roll        = 0.5 * rho * v_roll**2
+            drag_roll     = q_roll * landing_sref * landing_cd
             rolling_force = mu_roll_landing * epicairplane.weight
-            decel = (drag_roll + rolling_force) / mass if mass > 0.0 else 0.0
+            decel         = (drag_roll + rolling_force) / mass if mass > 0.0 else 0.0
             if decel <= 1e-9:
                 landing_roll_m = float("inf")
                 landing_time_s = float("inf")
                 break
-            v_next = max(0.0, v_roll - decel * landing_dt_s)
+            v_next         = max(0.0, v_roll - decel * landing_dt_s)
             landing_roll_m += 0.5 * (v_roll + v_next) * landing_dt_s
             landing_time_s += landing_dt_s
-            v_roll = v_next
+            v_roll         = v_next
     finally:
         epicairplane.velocity, epicairplane.aoa, epicairplane.trim = saved_landing_state
     if landing_time_s >= landing_t_max_s and v_roll > 0.1:
         landing_roll_m = float("inf")
         landing_time_s = float("inf")
+
     print("Ground roll (simple):")
     print(f"  Takeoff speed: {v_to * KNOTS_PER_MPS:.1f} kt")
     print(f"  Ground roll: {ground_roll_m:.1f} m ({ground_roll_m * M_TO_FT:.0f} ft)")
@@ -1319,9 +1104,9 @@ def _run_design_point():
         print("  Time to stop: not reached (model limit)")
 
     # Stall margin compliance summary
-    stall_margin_takeoff_v2 = v_to / stall_speed if stall_speed > 0.0 else float("nan")
-    stall_margin_takeoff_climb = v_climb / stall_speed if stall_speed > 0.0 else float("nan")
-    stall_margin_level_flight = vbest / stall_speed if stall_speed > 0.0 else float("nan")
+    stall_margin_takeoff_v2       = v_to      / stall_speed if stall_speed > 0.0 else float("nan")
+    stall_margin_takeoff_climb    = v_climb   / stall_speed if stall_speed > 0.0 else float("nan")
+    stall_margin_level_flight     = vbest     / stall_speed if stall_speed > 0.0 else float("nan")
     stall_margin_landing_approach = v_approach / stall_speed if stall_speed > 0.0 else float("nan")
     print("Stall margin compliance:")
     print(
@@ -1344,28 +1129,25 @@ def _run_design_point():
         f"(req >= {stall_margin_landing_approach_req:.2f}) "
         f"{'PASS' if stall_margin_landing_approach >= stall_margin_landing_approach_req else 'FAIL'}"
     )
+
     # Cruise polar extraction used for summary metrics and optional plots.
-    aoa_samples = np.linspace(epicairplane.aoa - 6.0, epicairplane.aoa + 8.0, 61)
+    aoa_samples   = np.linspace(epicairplane.aoa - 6.0, epicairplane.aoa + 8.0, 61)
     polar_results = drag_polar_at_speed(
-        epicairplane,
-        vbest,
-        aoa_samples,
-        trim_guess=epicairplane.trim,
-        retrim=True,
+        epicairplane, vbest, aoa_samples, trim_guess=epicairplane.trim, retrim=True,
     )
     q_ref = 0.5 * rho * vbest**2
     s_ref = epicairplane.mwing.area
-    aoa_plot = []
-    cl_plot = []
-    cd_plot = []
+    aoa_plot   = []
+    cl_plot    = []
+    cd_plot    = []
     cl_cd_plot = []
     for aoa_val, _trim_val, drag_val, lift_val in polar_results:
         if not (np.isfinite(drag_val) and np.isfinite(lift_val)):
             continue
         if q_ref <= 0.0 or s_ref <= 0.0:
             continue
-        cd_val = drag_val / (q_ref * s_ref)
-        cl_val = lift_val / (q_ref * s_ref)
+        cd_val    = drag_val / (q_ref * s_ref)
+        cl_val    = lift_val / (q_ref * s_ref)
         if not np.isfinite(cd_val) or cd_val <= 0.0:
             continue
         cl_cd_val = cl_val / cd_val
@@ -1375,20 +1157,19 @@ def _run_design_point():
             cd_plot.append(float(cd_val))
             cl_cd_plot.append(float(cl_cd_val))
 
-    cd0_fit = float("nan")
-    k_fit = float("nan")
-    ldmax_fit = float("nan")
+    cd0_fit          = float("nan")
+    k_fit            = float("nan")
+    ldmax_fit        = float("nan")
     cl_alpha_deg_fit = float("nan")
     cl_alpha_rad_fit = float("nan")
-    cl0_fit = float("nan")
-    cl_ldmax_fit = float("nan")
-    e_fit = float("nan")
+    cl0_fit          = float("nan")
+    cl_ldmax_fit     = float("nan")
+    e_fit            = float("nan")
     cl_cd_polar_points = len(cl_plot)
     if len(cl_plot) >= 3:
-        aoa_arr = np.asarray(aoa_plot, dtype=float)
-        cl_arr = np.asarray(cl_plot, dtype=float)
-        cd_arr = np.asarray(cd_plot, dtype=float)
-        cl_cd_arr = np.asarray(cl_cd_plot, dtype=float)
+        aoa_arr   = np.asarray(aoa_plot,   dtype=float)
+        cl_arr    = np.asarray(cl_plot,    dtype=float)
+        cd_arr    = np.asarray(cd_plot,    dtype=float)
 
         cl_alpha_deg_fit, cl0_fit = np.polyfit(aoa_arr, cl_arr, 1)
         cl_alpha_rad_fit = cl_alpha_deg_fit * (180.0 / math.pi)
@@ -1397,20 +1178,16 @@ def _run_design_point():
         k_fit, cd0_fit = np.polyfit(cl2_arr, cd_arr, 1)
         e_fit = (
             1.0 / (math.pi * epicairplane.mwing.ar * k_fit)
-            if k_fit > 0.0 and epicairplane.mwing.ar > 0.0
-            else float("nan")
+            if k_fit > 0.0 and epicairplane.mwing.ar > 0.0 else float("nan")
         )
         cl_ldmax_fit = (
             math.sqrt(cd0_fit / k_fit)
-            if cd0_fit > 0.0 and k_fit > 0.0
-            else float("nan")
+            if cd0_fit > 0.0 and k_fit > 0.0 else float("nan")
         )
         ldmax_fit = (
             1.0 / (2.0 * math.sqrt(cd0_fit * k_fit))
-            if cd0_fit > 0.0 and k_fit > 0.0
-            else float("nan")
+            if cd0_fit > 0.0 and k_fit > 0.0 else float("nan")
         )
-
         print("Approximate polar fit (cruise trim sweep):")
         print(f"  CD0: {cd0_fit:.5f}, k: {k_fit:.5f}, e: {e_fit:.3f}")
         print(f"  CL_alpha: {cl_alpha_deg_fit:.4f} /deg ({cl_alpha_rad_fit:.3f} /rad), CL0: {cl0_fit:.4f}")
@@ -1418,94 +1195,69 @@ def _run_design_point():
     else:
         print("Polar fit skipped: not enough valid CL/CD polar points.")
 
-    if plot_ld_vs_alpha:
-        # ============================
-        # Plot 4: L/D vs AoA (cruise)
-        # ============================
-        if aoa_plot:
-            design_aoa = float(epicairplane.aoa)
-            design_ld = (lift / drag) if drag else float("nan")
-            plt.figure()
-            plt.plot(aoa_plot, cl_cd_plot, label=f"L/D @ {v_knots:.1f} kt")
-            if np.isfinite(design_aoa) and np.isfinite(design_ld):
-                plt.scatter(
-                    [design_aoa],
-                    [design_ld],
-                    color="red",
-                    zorder=3,
-                    label=f"Design point ({design_aoa:.2f} deg, {design_ld:.2f})",
-                )
-            plt.xlabel("AoA (deg)")
-            plt.ylabel("L/D")
-            plt.title("L/D vs AoA at Cruise Speed")
-            plt.grid(True)
-            plt.legend()
-            plt.show()
-        else:
-            print("L/D vs AoA plot skipped: no valid polar points.")
+    if plot_ld_vs_alpha and aoa_plot:
+        design_aoa = float(epicairplane.aoa)
+        design_ld  = (lift / drag) if drag else float("nan")
+        plt.figure()
+        plt.plot(aoa_plot, cl_cd_plot, label=f"L/D @ {v_knots:.1f} kt")
+        if np.isfinite(design_aoa) and np.isfinite(design_ld):
+            plt.scatter([design_aoa], [design_ld], color="red", zorder=3,
+                        label=f"Design point ({design_aoa:.2f} deg, {design_ld:.2f})")
+        plt.xlabel("AoA (deg)")
+        plt.ylabel("L/D")
+        plt.title("L/D vs AoA at Cruise Speed")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+    elif plot_ld_vs_alpha:
+        print("L/D vs AoA plot skipped: no valid polar points.")
 
-    if plot_cl_cd_polar:
-        # ============================
-        # Plot 5: Drag polar (CL vs CD)
-        # ============================
-        if len(cl_plot) >= 3:
-            cd_arr = np.asarray(cd_plot, dtype=float)
-            cl_arr = np.asarray(cl_plot, dtype=float)
-            cruise_cd_point = (
-                drag / (q_ref * s_ref)
-                if q_ref > 0.0 and s_ref > 0.0
-                else float("nan")
-            )
-            cruise_cl_point = float(cruise_cl)
+    if plot_cl_cd_polar and len(cl_plot) >= 3:
+        cd_arr = np.asarray(cd_plot, dtype=float)
+        cl_arr = np.asarray(cl_plot, dtype=float)
+        cruise_cd_point = (
+            drag / (q_ref * s_ref) if q_ref > 0.0 and s_ref > 0.0 else float("nan")
+        )
+        cruise_cl_point = float(cruise_cl)
 
-            stall_cl_point = float("nan")
-            stall_cd_point = float("nan")
-            if np.isfinite(cd0_fit) and np.isfinite(k_fit):
-                stall_cl_point = float(clmax)
-                stall_cd_candidate = float(cd0_fit + k_fit * stall_cl_point**2)
-                if np.isfinite(stall_cd_candidate) and stall_cd_candidate > 0.0:
-                    stall_cd_point = stall_cd_candidate
-            if not (np.isfinite(stall_cd_point) and np.isfinite(stall_cl_point)):
-                stall_idx = int(np.nanargmax(cl_arr))
-                stall_cd_point = float(cd_arr[stall_idx])
-                stall_cl_point = float(cl_arr[stall_idx])
+        stall_cl_point = float("nan")
+        stall_cd_point = float("nan")
+        if np.isfinite(cd0_fit) and np.isfinite(k_fit):
+            stall_cl_point     = float(clmax)
+            stall_cd_candidate = float(cd0_fit + k_fit * stall_cl_point**2)
+            if np.isfinite(stall_cd_candidate) and stall_cd_candidate > 0.0:
+                stall_cd_point = stall_cd_candidate
+        if not (np.isfinite(stall_cd_point) and np.isfinite(stall_cl_point)):
+            stall_idx      = int(np.nanargmax(cl_arr))
+            stall_cd_point = float(cd_arr[stall_idx])
+            stall_cl_point = float(cl_arr[stall_idx])
 
-            plt.figure()
-            plt.scatter(cd_arr, cl_arr, s=18, alpha=0.9, label=f"Drag polar @ {v_knots:.1f} kt")
-            if np.isfinite(cruise_cd_point) and np.isfinite(cruise_cl_point):
-                plt.scatter(
-                    [cruise_cd_point],
-                    [cruise_cl_point],
-                    color="red",
-                    zorder=3,
-                    label=f"Design cruise point ({v_knots:.1f} kt)",
-                )
-            if np.isfinite(stall_cd_point) and np.isfinite(stall_cl_point):
-                plt.scatter(
-                    [stall_cd_point],
-                    [stall_cl_point],
-                    color="black",
-                    marker="x",
-                    s=64,
-                    zorder=3,
-                    label=f"Stall marker (CLmax {clmax:.2f})",
-                )
-            plt.xlabel("CD")
-            plt.ylabel("CL")
-            plt.title("Drag Polar (CL vs CD) at Cruise Speed")
-            plt.grid(True)
-            plt.legend()
-            plt.show()
-        else:
-            print("CL/CD polar plot skipped: not enough valid points.")
+        plt.figure()
+        plt.scatter(cd_arr, cl_arr, s=18, alpha=0.9, label=f"Drag polar @ {v_knots:.1f} kt")
+        if np.isfinite(cruise_cd_point) and np.isfinite(cruise_cl_point):
+            plt.scatter([cruise_cd_point], [cruise_cl_point], color="red", zorder=3,
+                        label=f"Design cruise point ({v_knots:.1f} kt)")
+        if np.isfinite(stall_cd_point) and np.isfinite(stall_cl_point):
+            plt.scatter([stall_cd_point], [stall_cl_point],
+                        color="black", marker="x", s=64, zorder=3,
+                        label=f"Stall marker (CLmax {clmax:.2f})")
+        plt.xlabel("CD")
+        plt.ylabel("CL")
+        plt.title("Drag Polar (CL vs CD) at Cruise Speed")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+    elif plot_cl_cd_polar:
+        print("CL/CD polar plot skipped: not enough valid points.")
 
     # Ps and Vmax extraction from a trimmed speed sweep.
-    perf_speeds = np.linspace(max(1.05 * stall_speed, 0.8 * vbest), max(3.0 * stall_speed, 2.2 * vbest), 41)
+    perf_speeds         = np.linspace(max(1.05 * stall_speed, 0.8 * vbest),
+                                      max(3.0 * stall_speed, 2.2 * vbest), 41)
     perf_power_required = np.full(perf_speeds.shape, np.nan, dtype=float)
-    saved_perf_state = (epicairplane.velocity, epicairplane.aoa, epicairplane.trim)
+    saved_perf_state    = (epicairplane.velocity, epicairplane.aoa, epicairplane.trim)
     try:
         alpha_seed = float(epicairplane.aoa)
-        trim_seed = float(epicairplane.trim)
+        trim_seed  = float(epicairplane.trim)
         for i, vtest in enumerate(perf_speeds):
             epicairplane.velocity = float(vtest)
             sol = epicairplane.solveTrim(alpha0=alpha_seed, de0=trim_seed, res=60)
@@ -1514,7 +1266,7 @@ def _run_design_point():
             if sol == [None, None]:
                 continue
             alpha_seed = float(sol[0])
-            trim_seed = float(sol[1])
+            trim_seed  = float(sol[1])
             dtest = float(epicairplane.sumFanddM(res=60)[0])
             ptest = dtest * float(vtest)
             if np.isfinite(ptest) and ptest > 0.0:
@@ -1523,15 +1275,14 @@ def _run_design_point():
         epicairplane.velocity, epicairplane.aoa, epicairplane.trim = saved_perf_state
 
     pwr_climb_req = float("nan")
-    climb_idx = int(np.argmin(np.abs(perf_speeds - v_climb)))
+    climb_idx     = int(np.argmin(np.abs(perf_speeds - v_climb)))
     if np.isfinite(perf_power_required[climb_idx]):
         pwr_climb_req = float(perf_power_required[climb_idx])
     elif np.any(np.isfinite(perf_power_required)):
         pwr_climb_req = float(np.nanmin(perf_power_required))
     initial_climb_ps = (
         (power_available - pwr_climb_req) / epicairplane.weight
-        if np.isfinite(pwr_climb_req) and epicairplane.weight > 0.0
-        else float("nan")
+        if np.isfinite(pwr_climb_req) and epicairplane.weight > 0.0 else float("nan")
     )
     ps_sweep = (
         (power_available - perf_power_required) / epicairplane.weight
@@ -1549,7 +1300,7 @@ def _run_design_point():
             if not (np.isfinite(r0) and np.isfinite(r1)):
                 continue
             if r0 >= 0.0 and r1 <= 0.0 and abs(r1 - r0) > 1e-12:
-                frac = r0 / (r0 - r1)
+                frac     = r0 / (r0 - r1)
                 vmax_mps = float(perf_speeds[i] + frac * (perf_speeds[i + 1] - perf_speeds[i]))
                 break
         if not np.isfinite(vmax_mps):
@@ -1558,9 +1309,8 @@ def _run_design_point():
                 vmax_mps = float(perf_speeds[int(feasible[-1])])
 
     ground_roll_ft = ground_roll_m * M_TO_FT if np.isfinite(ground_roll_m) else float("nan")
-    ps_init_fts = initial_climb_ps * M_TO_FT if np.isfinite(initial_climb_ps) else float("nan")
-    ps_min_fts = min_ps * M_TO_FT if np.isfinite(min_ps) else float("nan")
-
+    ps_init_fts    = initial_climb_ps * M_TO_FT if np.isfinite(initial_climb_ps) else float("nan")
+    ps_min_fts     = min_ps * M_TO_FT if np.isfinite(min_ps) else float("nan")
     print(
         "Requested performance summary: "
         f"Aero[CLa={cl_alpha:.4f}/deg, CLmax={clmax:.3f}, CD0={cd0_fit:.5f}, "
