@@ -1352,8 +1352,8 @@ def run_dae21_example(plot: bool = True):
     E_FACE_PSI = 2.70e6
     SIGMA_Y_FACE_PSI = 7.0e4
 
-    E_CORE_PSI = 200
-    G_CORE_PSI = 300
+    E_CORE_PSI = 1000
+    G_CORE_PSI = 435
     SIGMA_Y_CORE_PSI = 2.7e1
     K_WR = 0.76
 
@@ -1397,7 +1397,7 @@ def run_dae21_example(plot: bool = True):
     OPTIMIZER_STEP = 1
     OPTIMIZER_MAX_ITER = 2000
     OPTIMIZER_N_SPAN = 121  # use lower resolution for faster optimization search
-    OPTIMIZER_OBJECTIVE_MODE = "peak_then_total"  # "peak_then_total" or "total"
+    OPTIMIZER_OBJECTIVE_MODE = "total"  # "peak_then_total" or "total"
     OPTIMIZE_TUBE_LENGTHS = True
     OPTIMIZER_TUBE_LENGTH_STEP_IN = 0.5
     OPTIMIZER_TUBE_LENGTH_MIN_IN = 0.0
@@ -1413,7 +1413,6 @@ def run_dae21_example(plot: bool = True):
     ya_t, ya_b = _y_bounds_at_x(xaf, yaf, X_AFT)
     tubes = [
         {"x": X_QC, "y": 0.5 * (yq_t + yq_b), "od": TUBE1_OD_IN, "id": TUBE1_ID_IN, "E": E_TUBE1_PSI, "sigma_y": SIGMA_Y_TUBE1_PSI, "nu": NU_TUBE1, "length_from_root": TUBE_LENGTH_IN},
-        {"x": X_MID, "y": 0.5 * (ym_t + ym_b), "od": TUBE1_OD_IN, "id": TUBE1_ID_IN, "E": E_TUBE1_PSI, "sigma_y": SIGMA_Y_TUBE1_PSI, "nu": NU_TUBE1, "length_from_root": TUBE_LENGTH_IN},
         {"x": X_AFT, "y": 0.5 * (ya_t + ya_b), "od": TUBE2_OD_IN, "id": TUBE2_ID_IN, "E": E_TUBE2_PSI, "sigma_y": SIGMA_Y_TUBE2_PSI, "nu": NU_TUBE2, "length_from_root": TUBE_LENGTH_IN},
     ]
     rovings = {
