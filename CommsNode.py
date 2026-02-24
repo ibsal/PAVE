@@ -538,7 +538,7 @@ body             = Fuselage(1.0541, 0.3048, 0.21336, 0.9, 0.00635e-3, 0.3)
 booms            = Fuselage(1.4, 0.03, 0.03, 1, 0.00635e-3, 0.05)
 batteryElectric  = Powerplant(7992000, 0.59, 4000)
 fuselages        = [body, booms, booms]
-
+'''
 design_point = x = [
     4.4914820,  # wingSpan (m)   = 176.830 in
     0.2614676,  # wingChord (m)  = 10.294 in
@@ -548,6 +548,17 @@ design_point = x = [
     1.5046198,  # xhtqc (m)      = 59.237 in
     1.481,      # wingIncidence (deg)
     1.800,      # tailIncidence (deg)
+]
+'''
+design_point = x = [
+    4.57200000,  # wingSpan (m)   = 180.00 in
+    0.30480000,  # wingChord (m)  = 12.00 in
+    0.31852000,  # xwqc (m)       = 12.54 in
+    1.14735682,  # hSpan (m)      = 45.17 in
+    0.16182000,  # hChord (m)     = 6.37 in
+    1.21734000,  # xhtqc (m)      = 47.93 in
+    0.54719505,  # wingIncidence (deg)
+    -1.48918590, # tailIncidence (deg)
 ]
 default_wing_incidence = 1.964
 default_tail_incidence = -0.1864

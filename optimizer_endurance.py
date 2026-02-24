@@ -66,25 +66,42 @@ def optimize_endurance(
         bounds = [
             (4.0, 4.5),
             (0.26, 0.40),
-            (0.05, xcg + 0.2),
-            (0.60, 1.8),
-            (0.15, 0.30),
-            (xcg + 0.2, xcg + 1.8),
+            (0.05, xcg + 0.15),         # xwqc: wing quarter-chord x-position (always positive)
+            (0.60, 1.8),                # hSpan
+            (htailArMin, htailArMax),   # htail_AR  (replaces hChord; satisfies AR by construction)
+            (htailVolMin, htailVolMax), # htailVol  (replaces xhtqc; satisfies vol by construction)
             (0.0, 3.0),   # wing incidence (deg)
-            (-4.0, 4.0),   # tail incidence (deg)
+            (-4.0, 4.0),  # tail incidence (deg)
         ]
-    design_var_names = (
-        "wingSpan",
-        "wingChord",
-        "xwqc",
-        "hSpan",
-        "hChord",
-        "xhtqc",
-        "wingIncidence",
-        "tailIncidence",
-    )
     bounds_lo = np.array([b[0] for b in bounds], dtype=float)
     bounds_hi = np.array([b[1] for b in bounds], dtype=float)
+
+    def _decode_x(x_enc):
+        """Decode optimization vector → physical aircraft variables.
+
+        Encoded:  [wingSpan, wingChord, xwqc,  hSpan, htail_AR, htailVol, wingInc, tailInc]
+        Physical: [wingSpan, wingChord, xwqc,  hSpan, hChord,   xhtqc,   wingInc, tailInc]
+
+        xwqc is encoded directly (guaranteed positive by bounds).
+        htail_AR and htailVol encode hChord and xhtqc so that AR and volume-coefficient
+        constraints are satisfied exactly within their respective bounds.
+        Clearance is a derived check (rarely violated with a tight xwqc upper bound).
+        """
+        ws = float(x_enc[0])
+        wc = float(x_enc[1])
+        xwqc = float(x_enc[2])  # direct — always positive by bounds
+        hs = float(x_enc[3])
+        ar = float(x_enc[4])    # htail_AR
+        hv = float(x_enc[5])    # htailVol
+        wi = float(x_enc[6])
+        ti = float(x_enc[7])
+        hc = hs / ar if ar > 0.0 else 0.0
+        ha = hs * hc                       # htail_area (rectangular)
+        wa = ws * wc                       # wing_area  (rectangular)
+        wm = wc                            # wing MAC   (rectangular)
+        xhtqc = xcg + hv * wa * wm / ha if ha > 0.0 else xcg
+        return np.array([ws, wc, xwqc, hs, hc, xhtqc, wi, ti], dtype=float)
+
     hard_reject_value = 1e30
     # Allow a small numerical tolerance because solveTrim uses a root solver.
     lift_shortfall_tol_frac = 1.0e-3
@@ -473,8 +490,7 @@ def optimize_endurance(
             "bounds_lo_json": json.dumps([float(v) for v in bounds_lo], separators=(",", ":")),
             "bounds_hi_json": json.dumps([float(v) for v in bounds_hi], separators=(",", ":")),
         }
-        for i, key in enumerate(design_var_names):
-            eval_row[key] = float(x[i]) if i < x.shape[0] else np.nan
+        # Physical variable values are logged after decoding below.
 
         def _report_counts():
             if evalCount % 10 != 0:
@@ -536,33 +552,42 @@ def optimize_endurance(
             return _constraint_fail("bounds", bound_violation)
         eval_row["viol_bounds"] = 0.0
 
-        wingSpan = float(x[0])
-        wingChord = float(x[1])
-        xwqc = float(x[2])
+        # Decode encoded optimization variables → physical aircraft variables.
+        # htail_AR/htailVol/tail_clearance encode AR, volume-coefficient, and
+        # LE-gap constraints, so those checks are satisfied by construction.
+        x_phys = _decode_x(x)
+        wingSpan   = float(x_phys[0])
+        wingChord  = float(x_phys[1])
+        xwqc       = float(x_phys[2])
+        hSpan      = float(x_phys[3])
+        hChord     = float(x_phys[4])
+        xhtqc      = float(x_phys[5])
+        xvtqc      = xhtqc
 
-        hSpan = float(x[3])
-        hChord = float(x[4])
-        xhtqc = float(x[5])
-
-        xvtqc = xhtqc
+        # Log physical values (these are the meaningful quantities for the CSV).
+        for key, val in zip(
+            ("wingSpan", "wingChord", "xwqc", "hSpan", "hChord", "xhtqc", "wingIncidence", "tailIncidence"),
+            x_phys,
+        ):
+            eval_row[key] = float(val)
 
         current_stage = "pre_heavy"
+        # geom_nonpos: bounds enforce positive values; kept as a safety guard
         if wingSpan <= 0.0 or wingChord <= 0.0 or hSpan <= 0.0 or hChord <= 0.0:
             nonpos_violation = (
-                max(0.0, -wingSpan)
-                + max(0.0, -wingChord)
-                + max(0.0, -hSpan)
-                + max(0.0, -hChord)
+                max(0.0, -wingSpan) + max(0.0, -wingChord)
+                + max(0.0, -hSpan)  + max(0.0, -hChord)
             )
             return _constraint_fail("geom_nonpos", nonpos_violation)
 
-        if xwqc <= 0.0:
-            return _constraint_fail("xwqc", -xwqc)
+        # xwqc: guaranteed positive by bounds (no check needed)
 
+        # tail_aft_cg: guaranteed by htailVol > 0; kept as safety guard
         if xhtqc <= xcg or xvtqc <= xcg:
             tail_aft_violation = max(0.0, float(xcg - xhtqc)) + max(0.0, float(xcg - xvtqc))
             return _constraint_fail("tail_aft_cg", tail_aft_violation)
 
+        # clearance: derived from xwqc and xhtqc; rarely violated with tight xwqc bounds
         clearance = (xhtqc - 0.25 * hChord) - (xwqc + 0.75 * wingChord)
         eval_row["clearance_m"] = clearance
         clearance_violation = max(0.0, float(minClearance) - clearance)
@@ -584,15 +609,10 @@ def optimize_endurance(
                 max(0.0, -wing_area) + max(0.0, -wing_mac) + max(0.0, -htail_area)
             )
             return _constraint_fail("wing_area", wing_area_violation)
-        htail_ar = float(hSpan**2 / htail_area)
+        # htail_ar: guaranteed in [htailArMin, htailArMax] by the htail_AR bound
+        htail_ar = float(hSpan**2 / htail_area) if htail_area > 0.0 else float("nan")
         eval_row["htail_ar"] = htail_ar
-        if not np.isfinite(htail_ar):
-            htail_ar_violation = 1.0
-        else:
-            htail_ar_violation = max(0.0, float(htailArMin - htail_ar)) + max(0.0, float(htail_ar - htailArMax))
-        eval_row["viol_htail_ar"] = htail_ar_violation
-        if (not np.isfinite(htail_ar)) or (htail_ar < float(htailArMin)) or (htail_ar > float(htailArMax)):
-            return _constraint_fail("htail_ar", htail_ar_violation)
+        eval_row["viol_htail_ar"] = 0.0
         tail_arm = float(xvtqc - xcg)
         eval_row["tail_arm_m"] = tail_arm
         if tail_arm <= 0.0:
@@ -616,16 +636,14 @@ def optimize_endurance(
         if totalMass_est > float(totalMassMax):
             return _constraint_fail("mass_est", totalMass_est - float(totalMassMax))
 
-        htail_volume = (htail_area * (xhtqc - xcg)) / (wing_area * wing_mac)
+        # htail_vol_est: guaranteed in [htailVolMin, htailVolMax] by the htailVol bound
+        htail_volume = (htail_area * (xhtqc - xcg)) / (wing_area * wing_mac) if (wing_area > 0.0 and wing_mac > 0.0) else float("nan")
         eval_row["htail_volume_est"] = htail_volume
-        htail_volume_violation = max(0.0, float(htailVolMin) - htail_volume) + max(0.0, htail_volume - float(htailVolMax))
-        eval_row["viol_htail_vol_est"] = htail_volume_violation
-        if (htail_volume < float(htailVolMin)) or (htail_volume > float(htailVolMax)):
-            return _constraint_fail("htail_vol_est", htail_volume_violation)
+        eval_row["viol_htail_vol_est"] = 0.0
 
         current_stage = "build"
         try:
-            commsNode, totalMass = build_aircraft(x)
+            commsNode, totalMass = build_aircraft(x_phys)
         except Exception:
             return _constraint_fail("build_aircraft", 1.0)
         eval_row["has_build_data"] = 1
@@ -792,7 +810,8 @@ def optimize_endurance(
     xbest = _clip_to_bounds(xbest)
     fallback_to_feasible = False
     try:
-        commsNode, totalMass = build_aircraft(xbest)
+        x_phys_best = _decode_x(xbest)
+        commsNode, totalMass = build_aircraft(x_phys_best)
         vbest, pwr, thrust = commsNode.solveBestVelocity(
             levelFlightMargin,
             vguess=20.0,
@@ -822,7 +841,8 @@ def optimize_endurance(
                 "Try relaxing constraints, improving x_start, or increasing penalty weights."
             ) from exc
         xbest = np.array(bestSeen["x"], dtype=float).copy()
-        commsNode, totalMass = build_aircraft(xbest)
+        x_phys_best = _decode_x(xbest)
+        commsNode, totalMass = build_aircraft(x_phys_best)
         vbest, pwr, thrust = commsNode.solveBestVelocity(
             levelFlightMargin,
             vguess=20.0,
@@ -862,18 +882,18 @@ def optimize_endurance(
         "totalMass_kg": float(totalMass),
         "staticMargin": float(sm),
         "xbest": {
-            "wingSpan": float(xbest[0]),
-            "wingChord": float(xbest[1]),
-            "xwqc": float(xbest[2]),
-            "hSpan": float(xbest[3]),
-            "hChord": float(xbest[4]),
-            "xhtqc": float(xbest[5]),
+            "wingSpan": float(x_phys_best[0]),
+            "wingChord": float(x_phys_best[1]),
+            "xwqc": float(x_phys_best[2]),
+            "hSpan": float(x_phys_best[3]),
+            "hChord": float(x_phys_best[4]),
+            "xhtqc": float(x_phys_best[5]),
             "vHeight": float(commsNode.vtail.span * 0.5),
             "vChord": float(commsNode.vtail.rootChord),
             "vtailVolume": float(vtail_volume),
-            "wingIncidence": float(xbest[6]),
-            "tailIncidence": float(xbest[7]),
-            "boomLength": float(max(float(xbest[5] - xbest[2]), float(boomLengthMin))),
+            "wingIncidence": float(x_phys_best[6]),
+            "tailIncidence": float(x_phys_best[7]),
+            "boomLength": float(max(float(x_phys_best[5] - x_phys_best[2]), float(boomLengthMin))),
         },
         "de_result": de_result,
         "local_result": local_result,
@@ -892,21 +912,6 @@ def _example_run():
     batteryElectric = Powerplant(7992000, 0.59, 4000)
     xcg = 0.35
 
-    prepopulated_best = [4.4, 0.3, 0.29024762, 0.46046029, 0.18097007, 2.01117241, 0.32476509, 3.30305594]
-    run_mode = "de"  # "de" or "local_only"
-    seed_de = False
-    local_only = run_mode == "local_only"
-    x_start = prepopulated_best if (local_only or seed_de) else None
-    bounds = [
-        (4.4, 4.572),
-        (0.3048, 0.6),
-        (0.05, xcg + 0.3),
-        (0.60, 1.8),
-        (0.18, 0.40),
-        (xcg + 0.4, xcg + 3.0),
-        (0.0, 3.0),   # wing incidence (deg)
-        (-3.0, 2.0),   # tail incidence (deg)
-    ]
     use_penalty = True
     penalty_exponent = 1.35
     penalty_base = 2.0e4
@@ -915,6 +920,27 @@ def _example_run():
     htail_ar_max = 8.0
     htail_volume_min = 0.3
     htail_volume_max = 0.7
+
+    # Encoding: [wingSpan, wingChord, xwqc, hSpan, htail_AR, htailVol, wingInc, tailInc]
+    # xwqc is direct; htail_AR and htailVol are the reparametrized tail variables.
+    # Converted from old physical best: xwqc=0.290, hSpan=0.460, hChord=0.181, xhtqc=2.011
+    #   htail_AR = hSpan/hChord = 0.460/0.181 ≈ 2.544
+    #   htailVol = htail_area*(xhtqc-xcg)/(wing_area*wing_mac) ≈ 0.326
+    prepopulated_best = [4.572, 0.3048, 0.29024762, 0.46046029, 2.5444, 0.3259, 0.32476509, 3.30305594]
+    run_mode = "de"  # "de" or "local_only"
+    seed_de = False
+    local_only = run_mode == "local_only"
+    x_start = prepopulated_best if (local_only or seed_de) else None
+    bounds = [
+        (4.572, 4.572),                            # wingSpan  (fixed)
+        (0.3048, 0.3048),                          # wingChord (fixed)
+        (0.05, xcg + 0.15),                        # xwqc (guaranteed positive; tight range reduces clearance failures)
+        (0.40, 1.8),                               # hSpan
+        (htail_ar_min, htail_ar_max),              # htail_AR
+        (htail_volume_min, htail_volume_max),      # htailVol
+        (0.0, 3.0),                                # wing incidence (deg)
+        (-3.0, 2.0),                               # tail incidence (deg)
+    ]
     trim_abs_max_deg = 5.0
     cruise_velocity_mode = "optimal"  # "optimal" or "stall_margin"
     evaluation_log_path = "optimizer_endurance_eval_log.csv"
@@ -933,7 +959,7 @@ def _example_run():
         fuselages=[body, booms, booms],
         xcg=xcg,
         cdomisc=0.01,
-        baseMass=12.5,
+        baseMass=16.5,
         totalMassMax=22.6796,
         htailArMin=htail_ar_min,
         htailArMax=htail_ar_max,
