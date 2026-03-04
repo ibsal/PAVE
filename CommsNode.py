@@ -550,7 +550,16 @@ design_point = x = [
     1.800,      # tailIncidence (deg)
 ]
 '''
-design_point = x = [4.5719554,  0.3127835,  0.31398831, 0.78371218, 0.1929609,  1.72966979, 1.83076884, 0.65283898]
+design_point = x = [
+    4.57200000,  # wingSpan (m)   = 180.00 in
+    0.30480000,  # wingChord (m)  = 12.00 in
+    0.31852000,  # xwqc (m)       = 12.54 in
+    1.14735682,  # hSpan (m)      = 45.17 in
+    0.16182000,  # hChord (m)     = 6.37 in
+    1.21734000,  # xhtqc (m)      = 47.93 in
+    0.54719505,  # wingIncidence (deg)
+    -1.48918590, # tailIncidence (deg)
+]
 default_wing_incidence = 1.964
 default_tail_incidence = -0.1864
 default_vtail_volume   = 0.03
