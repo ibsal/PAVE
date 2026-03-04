@@ -31,7 +31,7 @@ CONFIG = {
     "design_units": "m",
     "stl_units": "mm",
     "fuselage_axis": "Y",
-    "fuselage_slices": 50,
+    "fuselage_slices": 5,
     "fuselage_nose_cap": "point",
     "fuselage_tail_cap": "flat",
     "fuselage_name": "MyFuselage",
@@ -54,6 +54,9 @@ CONFIG = {
     "main_wing_z": 0.0,
     "main_wing_sweep_deg": 0.0,
     "main_wing_dihedral_deg": 0.0,
+    "lifting_surface_tess_u": 16.0,
+    "lifting_surface_tess_w": 33.0,
+    "lifting_surface_sect_tess_u": 6.0,
     # Optional Selig/Lednicer airfoil file (.dat/.af). Leave blank to keep the
     # airfoil already stored in the template geom.
     "main_wing_airfoil_dat": str(Path("PyFoil") / "coord_seligFmt" / "psu94097.dat"),
@@ -73,17 +76,36 @@ CONFIG = {
     # "h_tail" -> two fins placed at the ends of the horizontal tail
     "include_vertical_tail": True,
     "vertical_tail_layout": "h_tail",
+    "h_tail_split_verticals": True,
     "vertical_tail_height": 0.266,
     "vertical_tail_chord": 0.266,
+    "vertical_tail_tip_chord": 0.266,
     "vertical_tail_xqc": 1.72966979,
     "vertical_tail_y": 0.0,
     "vertical_tail_z": 0.0,
-    "vertical_tail_sweep_deg": 0.0,
+    "vertical_tail_sweep_deg": 10,
+    "h_tail_upper_height": 0.266,
+    "h_tail_upper_root_chord": 0.266,
+    "h_tail_upper_tip_chord": 0.1,
+    "h_tail_upper_sweep_deg": None,
+    "h_tail_lower_height": 0.266,
+    "h_tail_lower_root_chord": 0.266,
+    "h_tail_lower_tip_chord": 0.266,
+    "h_tail_lower_sweep_deg": None,
     "vertical_tail_airfoil_dat": str(Path("PyFoil") / "coord_seligFmt" / "s9033.dat"),
 
     # H-tail fin placement tweaks (applied on top of horizontal tail tip positions)
     "h_tail_fin_inset": 0.0,
     "h_tail_fin_z_offset": 0.0,
+
+    # Optional straight twin booms. They span automatically from the main wing
+    # quarter-chord X position to the horizontal tail quarter-chord X position.
+    "include_tail_booms": True,
+    "tail_boom_diameter": 0.0254,
+    # Center-to-center spacing between the two booms.
+    "tail_boom_spacing": 0.500,
+    # Added to the horizontal tail Z location (or body Z=0 if no h-tail).
+    "tail_boom_z": 0.0,
 }
 
 
@@ -145,11 +167,21 @@ def _converted_cfg() -> dict:
         "horizontal_tail_z",
         "vertical_tail_height",
         "vertical_tail_chord",
+        "vertical_tail_tip_chord",
         "vertical_tail_xqc",
         "vertical_tail_y",
         "vertical_tail_z",
+        "h_tail_upper_height",
+        "h_tail_upper_root_chord",
+        "h_tail_upper_tip_chord",
+        "h_tail_lower_height",
+        "h_tail_lower_root_chord",
+        "h_tail_lower_tip_chord",
         "h_tail_fin_inset",
         "h_tail_fin_z_offset",
+        "tail_boom_diameter",
+        "tail_boom_spacing",
+        "tail_boom_z",
     ):
         cfg[key] = float(cfg[key]) * scale
     return cfg
@@ -234,6 +266,34 @@ def _optional_path(value: str | None) -> Path | None:
     if not text:
         return None
     return Path(text).expanduser()
+
+
+def _set_flat_end_caps(geom: ET.Element) -> None:
+    end_cap = geom.find("./ParmContainer/EndCap")
+    if end_cap is None:
+        return
+    flat_values = {
+        "CapUMinOption": 1.0,
+        "CapUMaxOption": 1.0,
+        "CapUMinStrength": 0.5,
+        "CapUMaxStrength": 0.5,
+    }
+    for tag, value in flat_values.items():
+        if end_cap.find(tag) is not None:
+            _set_parm_value(end_cap, tag, value)
+
+
+def _set_lifting_surface_mesh(geom: ET.Element, cfg: dict) -> None:
+    shape = geom.find("./ParmContainer/Shape")
+    if shape is not None:
+        if shape.find("Tess_U") is not None:
+            _set_parm_value(shape, "Tess_U", float(cfg["lifting_surface_tess_u"]))
+        if shape.find("Tess_W") is not None:
+            _set_parm_value(shape, "Tess_W", float(cfg["lifting_surface_tess_w"]))
+
+    for sec in geom.findall("./WingGeom/XSecSurf/XSec/ParmContainer/XSec"):
+        if sec.find("SectTess_U") is not None:
+            _set_parm_value(sec, "SectTess_U", float(cfg["lifting_surface_sect_tess_u"]))
 
 
 def _apply_fuselage_rotation(geom: ET.Element, cfg: dict) -> None:
@@ -323,8 +383,17 @@ def _airfoil_assignments(cfg: dict) -> dict[str, Path]:
     if bool(cfg["include_vertical_tail"]) and vtail_path is not None:
         layout = str(cfg["vertical_tail_layout"]).strip().lower()
         if layout == "h_tail":
-            assignments["LeftVerticalTailGeom"] = vtail_path
-            assignments["RightVerticalTailGeom"] = vtail_path
+            if bool(cfg.get("h_tail_split_verticals")):
+                for geom_name in (
+                    "LeftUpperVerticalTailGeom",
+                    "LeftLowerVerticalTailGeom",
+                    "RightUpperVerticalTailGeom",
+                    "RightLowerVerticalTailGeom",
+                ):
+                    assignments[geom_name] = vtail_path
+            else:
+                assignments["LeftVerticalTailGeom"] = vtail_path
+                assignments["RightVerticalTailGeom"] = vtail_path
         else:
             assignments["VerticalTailGeom"] = vtail_path
 
@@ -510,6 +579,64 @@ def _apply_airfoil_files_xml_fallback(output_path: Path, cfg: dict) -> list[str]
     return applied
 
 
+def _build_simple_boom_xsec_surf(length: float, diameter: float) -> ET.Element:
+    length = max(float(length), 1e-6)
+    diameter = max(float(diameter), 1e-6)
+    half_size = 0.5 * diameter
+    station_fracs = (0.0, 0.05, 0.95, 1.0)
+    xsec_nodes: list[ET.Element] = []
+
+    for frac in station_fracs:
+        xsec_node = ET.fromstring(
+            stl_to_vsp.build_xsec(
+                frac,
+                0.0,
+                0.0,
+                half_size,
+                half_size,
+                length,
+                is_point=False,
+                radius_full=diameter,
+            )
+        )
+
+        curve_type = xsec_node.find("./XSec/XSecCurve/XSecCurve/Type")
+        if curve_type is not None:
+            # In the VSP3 XML used here, Type 1 is the circle XSec and Type 2
+            # is ellipse.
+            curve_type.text = "1"
+
+        curve_parms = xsec_node.find("./XSec/XSecCurve/ParmContainer/XSecCurve")
+        if curve_parms is not None:
+            area = math.pi * (0.5 * diameter) ** 2
+            circle_diameter = curve_parms.find("Circle_Diameter")
+            if circle_diameter is None:
+                circle_diameter = ET.Element(
+                    "Circle_Diameter",
+                    {"Value": _sci(diameter), "ID": _uid()},
+                )
+                curve_parms.append(circle_diameter)
+            else:
+                circle_diameter.set("Value", _sci(diameter))
+            if curve_parms.find("Area") is not None:
+                _set_parm_value(curve_parms, "Area", area)
+            if curve_parms.find("HWRatio") is not None:
+                _set_parm_value(curve_parms, "HWRatio", 1.0)
+
+            # Remove rounded-rectangle-only parms so the node is closer to a
+            # native circle XSec and avoids carrying contradictory shape data.
+            for child in list(curve_parms):
+                if child.tag.startswith("RoundRect") or child.tag.startswith("RoundedRect"):
+                    curve_parms.remove(child)
+
+        xsec_nodes.append(xsec_node)
+
+    xsec_surf = ET.Element("XSecSurf")
+    for node in xsec_nodes:
+        xsec_surf.append(node)
+    return xsec_surf
+
+
 def _apply_airfoil_files_with_openvsp(output_path: Path, cfg: dict) -> list[str]:
     assignments = _airfoil_assignments(cfg)
     if not assignments:
@@ -676,6 +803,46 @@ def _set_planar_symmetry(geom: ET.Element, planar_flag: float) -> None:
         _set_parm_value(sym, "Sym_Planar_Flag", planar_flag)
 
 
+def _set_geom_xform(
+    geom: ET.Element,
+    *,
+    x_location: float,
+    y_location: float,
+    z_location: float,
+    x_rotation: float = 0.0,
+    y_rotation: float = 0.0,
+    z_rotation: float = 0.0,
+) -> None:
+    xform = geom.find("./ParmContainer/XForm")
+    if xform is None:
+        return
+
+    values = {
+        "X_Location": x_location,
+        "X_Rel_Location": x_location,
+        "Y_Location": y_location,
+        "Y_Rel_Location": y_location,
+        "Z_Location": z_location,
+        "Z_Rel_Location": z_location,
+        "X_Rotation": x_rotation,
+        "X_Rel_Rotation": x_rotation,
+        "Y_Rotation": y_rotation,
+        "Y_Rel_Rotation": y_rotation,
+        "Z_Rotation": z_rotation,
+        "Z_Rel_Rotation": z_rotation,
+    }
+    for tag, value in values.items():
+        if xform.find(tag) is not None:
+            _set_parm_value(xform, tag, value)
+
+
+def _split_vtail_sweep(cfg: dict, key: str) -> float:
+    value = cfg.get(key)
+    if value is None:
+        return float(cfg["vertical_tail_sweep_deg"])
+    return float(value)
+
+
 def _retune_wing_sections(
     geom: ET.Element,
     total_span: float,
@@ -802,7 +969,8 @@ def _retune_wing_sections(
 def _retune_vtail_sections(
     geom: ET.Element,
     height: float,
-    chord: float,
+    root_chord: float,
+    tip_chord: float,
     sweep_deg: float = 0.0,
 ) -> None:
     xsecs = geom.findall("./WingGeom/XSecSurf/XSec")
@@ -857,27 +1025,69 @@ def _retune_vtail_sections(
             else:
                 span_values.append(span_budget * max(value, 0.0) / template_total)
 
+    def _edge_sweeps(sec_root_chord: float, sec_tip_chord: float, sec_span: float) -> tuple[float, float]:
+        qc_dx = sec_span * math.tan(math.radians(sweep_deg))
+        chord_delta = sec_root_chord - sec_tip_chord
+        le_dx = qc_dx + 0.25 * chord_delta
+        te_dx = qc_dx - 0.75 * chord_delta
+        le_sweep = math.degrees(math.atan2(le_dx, max(sec_span, 1e-9)))
+        te_sweep = math.degrees(math.atan2(te_dx, max(sec_span, 1e-9)))
+        return le_sweep, te_sweep
+
+    total_noncap_span = sum(
+        span_values[idx] for idx, is_cap in enumerate(cap_mask) if not is_cap
+    )
+    first_noncap_idx = next((idx for idx, is_cap in enumerate(cap_mask) if not is_cap), None)
+    cap_le_sweep = 0.0
+    cap_te_sweep = 0.0
+    if first_noncap_idx is not None:
+        first_span = span_values[first_noncap_idx]
+        first_root = max(float(root_chord), 1e-6)
+        if total_noncap_span > 0.0:
+            first_end_frac = first_span / max(total_noncap_span, 1e-9)
+        else:
+            first_end_frac = 1.0
+        first_tip = max(
+            float(root_chord) + (float(tip_chord) - float(root_chord)) * first_end_frac,
+            1e-6,
+        )
+        cap_le_sweep, cap_te_sweep = _edge_sweeps(first_root, first_tip, max(first_span, 1e-9))
+
+    span_cursor = 0.0
+
     for idx, (sec, span_value) in enumerate(zip(section_nodes, span_values)):
         if cap_mask[idx]:
-            cap_scale = float(chord) / max(template_tips[idx], 1e-6)
-            root_chord = max(template_roots[idx] * cap_scale, 1e-6)
-            tip_chord = max(template_tips[idx] * cap_scale, 1e-6)
+            cap_scale = float(root_chord) / max(template_tips[idx], 1e-6)
+            sec_root_chord = max(template_roots[idx] * cap_scale, 1e-6)
+            sec_tip_chord = max(template_tips[idx] * cap_scale, 1e-6)
+            le_sweep = cap_le_sweep
+            te_sweep = cap_te_sweep
         else:
-            root_chord = max(float(chord), 1e-6)
-            tip_chord = max(float(chord), 1e-6)
-        area = 0.5 * (root_chord + tip_chord) * span_value
+            start_frac = span_cursor / max(total_noncap_span, 1e-9)
+            end_frac = (span_cursor + span_value) / max(total_noncap_span, 1e-9)
+            sec_root_chord = max(
+                float(root_chord) + (float(tip_chord) - float(root_chord)) * start_frac,
+                1e-6,
+            )
+            sec_tip_chord = max(
+                float(root_chord) + (float(tip_chord) - float(root_chord)) * end_frac,
+                1e-6,
+            )
+            span_cursor += span_value
+            le_sweep, te_sweep = _edge_sweeps(sec_root_chord, sec_tip_chord, max(span_value, 1e-9))
+        area = 0.5 * (sec_root_chord + sec_tip_chord) * span_value
         avg_chord = area / max(span_value, 1e-9)
-        taper = tip_chord / max(root_chord, 1e-9)
+        taper = sec_tip_chord / max(sec_root_chord, 1e-9)
         aspect = (span_value * span_value) / max(area, 1e-9)
         if abs(template_projected[idx]) < 1e-12:
             projected_span = 0.0
-            sec_sweep = template_sec_sweep[idx]
+            sec_sweep = 89.0 if first_noncap_idx is not None else template_sec_sweep[idx]
         else:
             projected_span = span_value
-            sec_sweep = sweep_deg
+            sec_sweep = te_sweep
 
-        _set_parm_value(sec, "Root_Chord", root_chord)
-        _set_parm_value(sec, "Tip_Chord", tip_chord)
+        _set_parm_value(sec, "Root_Chord", sec_root_chord)
+        _set_parm_value(sec, "Tip_Chord", sec_tip_chord)
         _set_parm_value(sec, "Span", span_value)
         if sec.find("Area") is not None:
             _set_parm_value(sec, "Area", area)
@@ -893,6 +1103,14 @@ def _retune_vtail_sections(
             _set_parm_value(sec, "Sweep", sweep_deg)
         if sec.find("Sec_Sweep") is not None:
             _set_parm_value(sec, "Sec_Sweep", sec_sweep)
+        for tag, value in (
+            ("InLESweep", le_sweep),
+            ("OutLESweep", le_sweep),
+            ("InTESweep", te_sweep),
+            ("OutTESweep", te_sweep),
+        ):
+            if sec.find(tag) is not None:
+                _set_parm_value(sec, tag, value)
         if sec.find("Dihedral") is not None:
             _set_parm_value(sec, "Dihedral", 0.0)
         if sec.find("Twist") is not None:
@@ -902,13 +1120,14 @@ def _retune_vtail_sections(
 
     wing_group = geom.find("./ParmContainer/WingGeom")
     if wing_group is not None:
-        area = float(height) * float(chord)
+        mean_chord = 0.5 * (float(root_chord) + float(tip_chord))
+        area = float(height) * mean_chord
         total_ar = (float(height) ** 2) / max(area, 1e-9)
         for tag, value in (
             ("TotalSpan", height),
             ("TotalProjectedSpan", height),
-            ("TotalChord", chord),
-            ("MAC", chord),
+            ("TotalChord", mean_chord),
+            ("MAC", mean_chord),
             ("TotalArea", area),
             ("CurvedArea", area),
             ("TotalAR", total_ar),
@@ -945,6 +1164,7 @@ def _build_main_wing_geom(template_root: ET.Element, cfg: dict) -> ET.Element:
     _remap_ids(geom)
     _prune_cloned_wing_geom(geom)
     _clear_geom_details(geom)
+    _set_flat_end_caps(geom)
     _set_text(geom.find("./ParmContainer"), "Name", "MainWingGeom")
     _set_text(geom.find("./WingGeom/ParmContainer"), "Name", "MainWing")
 
@@ -965,6 +1185,7 @@ def _build_main_wing_geom(template_root: ET.Element, cfg: dict) -> ET.Element:
         sweep_deg=float(cfg["main_wing_sweep_deg"]),
         dihedral_deg=float(cfg["main_wing_dihedral_deg"]),
     )
+    _set_lifting_surface_mesh(geom, cfg)
     return geom
 
 
@@ -1003,6 +1224,7 @@ def _build_horizontal_tail_geom(template_root: ET.Element, cfg: dict) -> ET.Elem
     _remap_ids(geom)
     _prune_cloned_wing_geom(geom)
     _clear_geom_details(geom)
+    _set_flat_end_caps(geom)
     _set_text(geom.find("./ParmContainer"), "Name", "HorizontalTailGeom")
     _set_text(geom.find("./WingGeom/ParmContainer"), "Name", "HorizontalTail")
 
@@ -1023,6 +1245,7 @@ def _build_horizontal_tail_geom(template_root: ET.Element, cfg: dict) -> ET.Elem
         sweep_deg=float(cfg["horizontal_tail_sweep_deg"]),
         dihedral_deg=float(cfg["horizontal_tail_dihedral_deg"]),
     )
+    _set_lifting_surface_mesh(geom, cfg)
     return geom
 
 
@@ -1033,32 +1256,100 @@ def _build_vertical_tail_geom(
     name: str,
     y_location: float,
     z_location: float,
+    xqc: float,
+    height: float,
+    root_chord: float,
+    tip_chord: float,
+    sweep_deg: float,
+    x_rotation: float = 90.0,
 ) -> ET.Element:
     geom = copy.deepcopy(_find_template_geom(template_root, "Wing", TEMPLATE_VTAIL))
     _remap_ids(geom)
     _prune_cloned_wing_geom(geom)
     _clear_geom_details(geom)
+    _set_flat_end_caps(geom)
     _set_text(geom.find("./ParmContainer"), "Name", f"{name}Geom")
     _set_text(geom.find("./WingGeom/ParmContainer"), "Name", name)
 
-    chord = float(cfg["vertical_tail_chord"])
-    x_le = float(cfg["vertical_tail_xqc"]) - 0.25 * chord
+    x_le = float(xqc) - 0.25 * float(root_chord)
     _set_wing_xform(
         geom,
         x_location=x_le,
         y_location=y_location,
         z_location=z_location,
         y_rotation=0.0,
-        x_rotation=90.0,
+        x_rotation=x_rotation,
     )
     _set_planar_symmetry(geom, 0.0)
     _retune_vtail_sections(
         geom,
-        height=float(cfg["vertical_tail_height"]),
-        chord=chord,
-        sweep_deg=float(cfg["vertical_tail_sweep_deg"]),
+        height=float(height),
+        root_chord=float(root_chord),
+        tip_chord=float(tip_chord),
+        sweep_deg=float(sweep_deg),
     )
+    _set_lifting_surface_mesh(geom, cfg)
     return geom
+
+
+def _tail_boom_geometry(cfg: dict) -> tuple[float, float, float, float, float]:
+    if not bool(cfg["include_main_wing"]):
+        raise ValueError("Tail booms require include_main_wing = True")
+    if not bool(cfg["include_horizontal_tail"]):
+        raise ValueError("Tail booms require include_horizontal_tail = True")
+
+    main_xqc = float(cfg["main_wing_xqc"])
+    tail_xqc = float(cfg["horizontal_tail_xqc"])
+    x_front = min(main_xqc, tail_xqc)
+    x_back = max(main_xqc, tail_xqc)
+    length = max(x_back - x_front, 1e-6)
+
+    center_y = float(cfg["horizontal_tail_y"])
+    half_spacing = 0.5 * abs(float(cfg["tail_boom_spacing"]))
+    left_y = center_y - half_spacing
+    right_y = center_y + half_spacing
+    z_location = float(cfg["horizontal_tail_z"]) + float(cfg["tail_boom_z"])
+
+    return x_front, length, left_y, right_y, z_location
+
+
+def _build_tail_boom_geoms(source_fuselage_geom: ET.Element, cfg: dict) -> list[ET.Element]:
+    if not bool(cfg["include_tail_booms"]):
+        return []
+    x_location, length, left_y, right_y, z_location = _tail_boom_geometry(cfg)
+    diameter = float(cfg["tail_boom_diameter"])
+
+    boom_geoms: list[ET.Element] = []
+    for name, y_location in (
+        ("LeftTailBoomGeom", left_y),
+        ("RightTailBoomGeom", right_y),
+    ):
+        geom = copy.deepcopy(source_fuselage_geom)
+        _remap_ids(geom)
+        _set_text(geom.find("./ParmContainer"), "n", name)
+        _set_text(geom.find("./FuselageGeom/ParmContainer"), "n", name)
+        _set_planar_symmetry(geom, 0.0)
+        _set_geom_xform(
+            geom,
+            x_location=x_location,
+            y_location=y_location,
+            z_location=z_location,
+        )
+
+        design = geom.find("./ParmContainer/Design")
+        if design is not None and design.find("Length") is not None:
+            _set_parm_value(design, "Length", length)
+
+        fuselage_geom = geom.find("./FuselageGeom")
+        if fuselage_geom is None:
+            continue
+        existing_xsec_surf = fuselage_geom.find("./XSecSurf")
+        if existing_xsec_surf is not None:
+            fuselage_geom.remove(existing_xsec_surf)
+        fuselage_geom.append(_build_simple_boom_xsec_surf(length, diameter))
+        boom_geoms.append(geom)
+
+    return boom_geoms
 
 
 def _build_vertical_tail_geoms(template_root: ET.Element, cfg: dict) -> list[ET.Element]:
@@ -1072,6 +1363,11 @@ def _build_vertical_tail_geoms(template_root: ET.Element, cfg: dict) -> list[ET.
                 name="VerticalTail",
                 y_location=float(cfg["vertical_tail_y"]),
                 z_location=float(cfg["vertical_tail_z"]),
+                xqc=float(cfg["vertical_tail_xqc"]),
+                height=float(cfg["vertical_tail_height"]),
+                root_chord=float(cfg["vertical_tail_chord"]),
+                tip_chord=float(cfg["vertical_tail_tip_chord"]),
+                sweep_deg=float(cfg["vertical_tail_sweep_deg"]),
             )
         ]
 
@@ -1087,6 +1383,44 @@ def _build_vertical_tail_geoms(template_root: ET.Element, cfg: dict) -> list[ET.
         left_y = center_y - max(half_span - inset, 0.0)
         right_y = center_y + max(half_span - inset, 0.0)
 
+        if bool(cfg.get("h_tail_split_verticals")):
+            geoms: list[ET.Element] = []
+            for side_name, y_location in (
+                ("Left", left_y),
+                ("Right", right_y),
+            ):
+                geoms.append(
+                    _build_vertical_tail_geom(
+                        template_root,
+                        cfg,
+                        name=f"{side_name}UpperVerticalTail",
+                        y_location=y_location,
+                        z_location=z_location,
+                        xqc=float(cfg["vertical_tail_xqc"]),
+                        height=float(cfg["h_tail_upper_height"]),
+                        root_chord=float(cfg["h_tail_upper_root_chord"]),
+                        tip_chord=float(cfg["h_tail_upper_tip_chord"]),
+                        sweep_deg=_split_vtail_sweep(cfg, "h_tail_upper_sweep_deg"),
+                        x_rotation=90.0,
+                    )
+                )
+                geoms.append(
+                    _build_vertical_tail_geom(
+                        template_root,
+                        cfg,
+                        name=f"{side_name}LowerVerticalTail",
+                        y_location=y_location,
+                        z_location=z_location,
+                        xqc=float(cfg["vertical_tail_xqc"]),
+                        height=float(cfg["h_tail_lower_height"]),
+                        root_chord=float(cfg["h_tail_lower_root_chord"]),
+                        tip_chord=float(cfg["h_tail_lower_tip_chord"]),
+                        sweep_deg=_split_vtail_sweep(cfg, "h_tail_lower_sweep_deg"),
+                        x_rotation=-90.0,
+                    )
+                )
+            return geoms
+
         return [
             _build_vertical_tail_geom(
                 template_root,
@@ -1094,6 +1428,11 @@ def _build_vertical_tail_geoms(template_root: ET.Element, cfg: dict) -> list[ET.
                 name="LeftVerticalTail",
                 y_location=left_y,
                 z_location=z_location,
+                xqc=float(cfg["vertical_tail_xqc"]),
+                height=float(cfg["vertical_tail_height"]),
+                root_chord=float(cfg["vertical_tail_chord"]),
+                tip_chord=float(cfg["vertical_tail_tip_chord"]),
+                sweep_deg=float(cfg["vertical_tail_sweep_deg"]),
             ),
             _build_vertical_tail_geom(
                 template_root,
@@ -1101,6 +1440,11 @@ def _build_vertical_tail_geoms(template_root: ET.Element, cfg: dict) -> list[ET.
                 name="RightVerticalTail",
                 y_location=right_y,
                 z_location=z_location,
+                xqc=float(cfg["vertical_tail_xqc"]),
+                height=float(cfg["vertical_tail_height"]),
+                root_chord=float(cfg["vertical_tail_chord"]),
+                tip_chord=float(cfg["vertical_tail_tip_chord"]),
+                sweep_deg=float(cfg["vertical_tail_sweep_deg"]),
             ),
         ]
 
@@ -1127,8 +1471,9 @@ def build_design_point_vsp(
         or bool(cfg["include_horizontal_tail"])
         or bool(cfg["include_vertical_tail"])
     )
+    include_any_extra_geom = include_any_surface or bool(cfg["include_tail_booms"])
 
-    if not include_any_surface and not _needs_fuselage_postprocess(cfg):
+    if not include_any_extra_geom and not _needs_fuselage_postprocess(cfg):
         with contextlib.redirect_stdout(io.StringIO()):
             stl_to_vsp.convert(
                 str(fuselage_stl),
@@ -1183,6 +1528,10 @@ def build_design_point_vsp(
             for geom in _build_vertical_tail_geoms(template_root, cfg):
                 vehicle.append(geom)
 
+    if fuselage_geom is not None and bool(cfg["include_tail_booms"]):
+        for geom in _build_tail_boom_geoms(fuselage_geom, cfg):
+            vehicle.append(geom)
+
     if hasattr(ET, "indent"):
         ET.indent(fuselage_tree, space="  ")
     fuselage_tree.write(output_path, encoding="utf-8", xml_declaration=True)
@@ -1208,11 +1557,39 @@ def build_design_point_vsp(
     print(
         "  Vertical tail: "
         + (
-            f"{cfg['vertical_tail_layout']} "
-            f"({cfg['vertical_tail_height']:.4f} high, {cfg['vertical_tail_chord']:.4f} chord)"
+            (
+                f"h_tail split "
+                f"(upper {cfg['h_tail_upper_height']:.4f} high, "
+                f"{cfg['h_tail_upper_root_chord']:.4f}->{cfg['h_tail_upper_tip_chord']:.4f}; "
+                f"lower {cfg['h_tail_lower_height']:.4f} high, "
+                f"{cfg['h_tail_lower_root_chord']:.4f}->{cfg['h_tail_lower_tip_chord']:.4f})"
+                if str(cfg["vertical_tail_layout"]).strip().lower() == "h_tail"
+                and bool(cfg.get("h_tail_split_verticals"))
+                else f"{cfg['vertical_tail_layout']} "
+                f"({cfg['vertical_tail_height']:.4f} high, "
+                f"{cfg['vertical_tail_chord']:.4f}->{cfg['vertical_tail_tip_chord']:.4f} chord)"
+            )
             if bool(cfg["include_vertical_tail"])
             else "omitted"
         )
+    )
+    if bool(cfg["include_tail_booms"]):
+        boom_x, boom_len, boom_left_y, boom_right_y, _boom_z = _tail_boom_geometry(cfg)
+        print(
+            "  Tail booms: "
+            f"2 x {boom_len:.4f} long / {cfg['tail_boom_diameter']:.4f} dia"
+        )
+        print(
+            "  Tail boom spanwise centers: "
+            f"{boom_left_y:.4f}, {boom_right_y:.4f}  (front X = {boom_x:.4f})"
+        )
+    else:
+        print("  Tail booms: omitted")
+    print(
+        "  Lifting surface mesh: "
+        f"Tess_U {cfg['lifting_surface_tess_u']:.0f}, "
+        f"Tess_W {cfg['lifting_surface_tess_w']:.0f}, "
+        f"SectTess_U {cfg['lifting_surface_sect_tess_u']:.0f}"
     )
     print(
         "  Unit conversion: "
