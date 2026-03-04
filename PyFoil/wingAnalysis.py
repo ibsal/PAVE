@@ -13,12 +13,12 @@ def _poly_props(x: np.ndarray, y: np.ndarray):
     x = np.asarray(x, dtype=float).ravel()
     y = np.asarray(y, dtype=float).ravel()
     if x.size < 3:
-        return 0.0, 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     if x[0] == x[-1] and y[0] == y[-1]:
         x = x[:-1]
         y = y[:-1]
     if x.size < 3:
-        return 0.0, 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
     xc = np.append(x, x[0])
     yc = np.append(y, y[0])
@@ -29,7 +29,7 @@ def _poly_props(x: np.ndarray, y: np.ndarray):
     cross = x0 * y1 - x1 * y0
     a_s = 0.5 * np.sum(cross)
     if abs(a_s) < EPS:
-        return 0.0, 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     if a_s < 0.0:
         return _poly_props(x[::-1], y[::-1])
 
@@ -38,7 +38,8 @@ def _poly_props(x: np.ndarray, y: np.ndarray):
     cy = np.sum((y0 + y1) * cross) / (6.0 * area)
     ixx0 = np.sum((y0 * y0 + y0 * y1 + y1 * y1) * cross) / 12.0
     iyy0 = np.sum((x0 * x0 + x0 * x1 + x1 * x1) * cross) / 12.0
-    return float(area), float(cx), float(cy), float(ixx0), float(iyy0)
+    ixy0 = np.sum((x0 * y1 + 2.0 * x0 * y0 + 2.0 * x1 * y1 + x1 * y0) * cross) / 24.0
+    return float(area), float(cx), float(cy), float(ixx0), float(iyy0), float(ixy0)
 
 
 def _offset_polygon(x: np.ndarray, y: np.ndarray, d: float):
@@ -309,6 +310,20 @@ def _roving_count_matrix(rovings: Optional[Dict[str, Dict[str, float]]], rov: Di
     return c
 
 
+def _solve_coupled_curvature(mx: np.ndarray, my: np.ndarray, eixx: np.ndarray, eiyy: np.ndarray, eixy: np.ndarray):
+    det = eixx * eiyy - eixy * eixy
+    coupled = np.abs(det) > EPS
+    kx_c = np.divide(mx * eiyy - my * eixy, det, out=np.zeros_like(mx), where=coupled)
+    ky_c = np.divide(my * eixx - mx * eixy, det, out=np.zeros_like(my), where=coupled)
+
+    # Near-singular stations fall back to uncoupled response.
+    kx_u = np.divide(mx, eixx, out=np.zeros_like(mx), where=eixx > EPS)
+    ky_u = np.divide(my, eiyy, out=np.zeros_like(my), where=eiyy > EPS)
+    kx = np.where(coupled, kx_c, kx_u)
+    ky = np.where(coupled, ky_c, ky_u)
+    return kx, ky
+
+
 def schrenk_half_wing_load(
     *,
     span: float,
@@ -371,7 +386,7 @@ def wing_span_analysis(
     y_coords: Optional[Sequence[float]] = None,
 ):
     xn, yn = _read_airfoil_xy(dat_path, x_coords, y_coords)
-    a_n, cx_n, cy_n, ixx0_n, iyy0_n = _poly_props(xn, yn)
+    a_n, cx_n, cy_n, ixx0_n, iyy0_n, ixy0_n = _poly_props(xn, yn)
     if a_n <= EPS:
         raise ValueError("Airfoil area must be positive.")
 
@@ -412,12 +427,14 @@ def wing_span_analysis(
     cy_skin = np.zeros(n, dtype=float)
     Ixxc_skin = np.zeros(n, dtype=float)
     Iyyc_skin = np.zeros(n, dtype=float)
+    Ixyc_skin = np.zeros(n, dtype=float)
 
     A_core = np.zeros(n, dtype=float)
     cx_core = np.zeros(n, dtype=float)
     cy_core = np.zeros(n, dtype=float)
     Ixxc_core = np.zeros(n, dtype=float)
     Iyyc_core = np.zeros(n, dtype=float)
+    Ixyc_core = np.zeros(n, dtype=float)
     A_mid = np.zeros(n, dtype=float)
     p_mid = np.zeros(n, dtype=float)
 
@@ -434,22 +451,24 @@ def wing_span_analysis(
         cyo = cy_n * c
         Ixx0_o = ixx0_n * c4
         Iyy0_o = iyy0_n * c4
+        Ixy0_o = ixy0_n * c4
 
         xi_n, yi_n = _offset_polygon(xn, yn, skin_thickness / max(c, EPS))
         if xi_n.size:
-            ai_n, cxi_n, cyi_n, ixx0i_n, iyy0i_n = _poly_props(xi_n, yi_n)
+            ai_n, cxi_n, cyi_n, ixx0i_n, iyy0i_n, ixy0i_n = _poly_props(xi_n, yi_n)
             Ai = ai_n * c2
             cxi = cxi_n * c
             cyi = cyi_n * c
             Ixx0_i = ixx0i_n * c4
             Iyy0_i = iyy0i_n * c4
+            Ixy0_i = ixy0i_n * c4
             inner_xy[i] = (xi_n * c, yi_n * c)
             xm = xi_n * c
             ym = yi_n * c
             A_mid[i] = Ai
             p_mid[i] = float(np.sum(np.hypot(np.diff(np.append(xm, xm[0])), np.diff(np.append(ym, ym[0])))))
         else:
-            Ai = cxi = cyi = Ixx0_i = Iyy0_i = 0.0
+            Ai = cxi = cyi = Ixx0_i = Iyy0_i = Ixy0_i = 0.0
             inner_xy[i] = (np.empty(0), np.empty(0))
 
         if Ai > EPS:
@@ -459,8 +478,10 @@ def wing_span_analysis(
                 cy_skin[i] = (Ao * cyo - Ai * cyi) / A_skin[i]
                 Ixx0_s = Ixx0_o - Ixx0_i
                 Iyy0_s = Iyy0_o - Iyy0_i
+                Ixy0_s = Ixy0_o - Ixy0_i
                 Ixxc_skin[i] = max(Ixx0_s - A_skin[i] * cy_skin[i] ** 2, 0.0)
                 Iyyc_skin[i] = max(Iyy0_s - A_skin[i] * cx_skin[i] ** 2, 0.0)
+                Ixyc_skin[i] = Ixy0_s - A_skin[i] * cx_skin[i] * cy_skin[i]
             else:
                 A_skin[i] = 0.0
         else:
@@ -469,6 +490,7 @@ def wing_span_analysis(
             cy_skin[i] = cyo
             Ixxc_skin[i] = max(Ixx0_o - Ao * cyo * cyo, 0.0)
             Iyyc_skin[i] = max(Iyy0_o - Ao * cxo * cxo, 0.0)
+            Ixyc_skin[i] = Ixy0_o - Ao * cxo * cyo
 
         if Ai > EPS:
             xh = xt_all[i] if nt else np.zeros(0, dtype=float)
@@ -481,13 +503,16 @@ def wing_span_analysis(
                 yAh = float(np.sum(Ah * yh))
                 Ixx0_h = float(np.sum(I_hole_c + Ah * yh * yh))
                 Iyy0_h = float(np.sum(I_hole_c + Ah * xh * xh))
+                Ixy0_h = float(np.sum(Ah * xh * yh))
                 cx_core[i] = (Ai * cxi - xAh) / Aci
                 cy_core[i] = (Ai * cyi - yAh) / Aci
                 Ixx0_c = Ixx0_i - Ixx0_h
                 Iyy0_c = Iyy0_i - Iyy0_h
+                Ixy0_c = Ixy0_i - Ixy0_h
                 A_core[i] = Aci
                 Ixxc_core[i] = max(Ixx0_c - A_core[i] * cy_core[i] ** 2, 0.0)
                 Iyyc_core[i] = max(Iyy0_c - A_core[i] * cx_core[i] ** 2, 0.0)
+                Ixyc_core[i] = Ixy0_c - A_core[i] * cx_core[i] * cy_core[i]
 
     EA_t = active * (tube["E"][None, :] * tube["A"][None, :]) if nt else np.zeros((n, 0))
     EA_base = Eface * A_skin + Ecore * A_core + np.sum(EA_t, axis=1)
@@ -496,42 +521,79 @@ def wing_span_analysis(
     y_na_base = (Eface * A_skin * cy_skin + Ecore * A_core * cy_core + np.sum(EA_t * yt_all, axis=1)) / EA_base_safe
     EIxx_t_base = np.sum(active * (tube["E"][None, :] * (tube["I"][None, :] + tube["A"][None, :] * (yt_all - y_na_base[:, None]) ** 2)), axis=1) if nt else 0.0
     EIyy_t_base = np.sum(active * (tube["E"][None, :] * (tube["I"][None, :] + tube["A"][None, :] * (xt_all - x_na_base[:, None]) ** 2)), axis=1) if nt else 0.0
+    EIxy_t_base = np.sum(active * (tube["E"][None, :] * (tube["A"][None, :] * (yt_all - y_na_base[:, None]) * (xt_all - x_na_base[:, None]))), axis=1) if nt else 0.0
     EIxx_base = Eface * (Ixxc_skin + A_skin * (cy_skin - y_na_base) ** 2) + Ecore * (Ixxc_core + A_core * (cy_core - y_na_base) ** 2) + EIxx_t_base
     EIyy_base = Eface * (Iyyc_skin + A_skin * (cx_skin - x_na_base) ** 2) + Ecore * (Iyyc_core + A_core * (cx_core - x_na_base) ** 2) + EIyy_t_base
-    kx_base = np.divide(mx, EIxx_base, out=np.zeros_like(mx), where=EIxx_base > EPS)
-    ky_base = np.divide(my, EIyy_base, out=np.zeros_like(my), where=EIyy_base > EPS)
+    EIxy_base = Eface * (Ixyc_skin + A_skin * (cx_skin - x_na_base) * (cy_skin - y_na_base)) + Ecore * (Ixyc_core + A_core * (cx_core - x_na_base) * (cy_core - y_na_base)) + EIxy_t_base
+    kx_base, ky_base = _solve_coupled_curvature(mx, my, EIxx_base, EIyy_base, EIxy_base)
 
     if nr:
-        strain_top = kx_base[:, None] * (y_top_all - y_na_base[:, None]) + ky_base[:, None] * (x_ref_all - x_na_base[:, None])
-        strain_bot = kx_base[:, None] * (y_bot_all - y_na_base[:, None]) + ky_base[:, None] * (x_ref_all - x_na_base[:, None])
         lane_is_tension = np.array([("tension" in str(nm)) for nm in rov["names"]], dtype=bool)[None, :]
-        choose_top = np.where(lane_is_tension, strain_top >= strain_bot, strain_top <= strain_bot)
         xr_all = x_ref_all
-        yr_all = np.where(choose_top, y_top_all, y_bot_all)
-        strain_sel = np.where(choose_top, strain_top, strain_bot)
-        E_r_eff = np.where(strain_sel >= 0.0, rov["E_tension"][None, :], rov["E_compression"][None, :])
+        E_r_eff = np.zeros((n, nr), dtype=float)
+        yr_all = np.zeros((n, nr), dtype=float)
+        x_na = x_na_base.copy()
+        y_na = y_na_base.copy()
+        kx = kx_base.copy()
+        ky = ky_base.copy()
+        EIxx = EIxx_base.copy()
+        EIyy = EIyy_base.copy()
+        EIxy = EIxy_base.copy()
+        choose_top_prev = None
+        for _ in range(40):
+            strain_top = kx[:, None] * (y_top_all - y_na[:, None]) + ky[:, None] * (x_ref_all - x_na[:, None])
+            strain_bot = kx[:, None] * (y_bot_all - y_na[:, None]) + ky[:, None] * (x_ref_all - x_na[:, None])
+            choose_top = np.where(lane_is_tension, strain_top >= strain_bot, strain_top <= strain_bot)
+            yr_all = np.where(choose_top, y_top_all, y_bot_all)
+            strain_sel = np.where(choose_top, strain_top, strain_bot)
+            E_r_eff = np.where(strain_sel >= 0.0, rov["E_tension"][None, :], rov["E_compression"][None, :])
+
+            EA_r = E_r_eff * A_r
+            EA = EA_base + np.sum(EA_r, axis=1)
+            EA_safe = np.where(EA > EPS, EA, np.nan)
+            x_na_new = (Eface * A_skin * cx_skin + Ecore * A_core * cx_core + np.sum(EA_t * xt_all, axis=1) + np.sum(EA_r * xr_all, axis=1)) / EA_safe
+            y_na_new = (Eface * A_skin * cy_skin + Ecore * A_core * cy_core + np.sum(EA_t * yt_all, axis=1) + np.sum(EA_r * yr_all, axis=1)) / EA_safe
+
+            EIxx_t = np.sum(active * (tube["E"][None, :] * (tube["I"][None, :] + tube["A"][None, :] * (yt_all - y_na_new[:, None]) ** 2)), axis=1) if nt else 0.0
+            EIyy_t = np.sum(active * (tube["E"][None, :] * (tube["I"][None, :] + tube["A"][None, :] * (xt_all - x_na_new[:, None]) ** 2)), axis=1) if nt else 0.0
+            EIxy_t = np.sum(active * (tube["E"][None, :] * (tube["A"][None, :] * (yt_all - y_na_new[:, None]) * (xt_all - x_na_new[:, None]))), axis=1) if nt else 0.0
+            EIxx_r = np.sum(E_r_eff * A_r * (yr_all - y_na_new[:, None]) ** 2, axis=1)
+            EIyy_r = np.sum(E_r_eff * A_r * (xr_all - x_na_new[:, None]) ** 2, axis=1)
+            EIxy_r = np.sum(E_r_eff * A_r * (xr_all - x_na_new[:, None]) * (yr_all - y_na_new[:, None]), axis=1)
+
+            EIxx_new = Eface * (Ixxc_skin + A_skin * (cy_skin - y_na_new) ** 2) + Ecore * (Ixxc_core + A_core * (cy_core - y_na_new) ** 2) + EIxx_t + EIxx_r
+            EIyy_new = Eface * (Iyyc_skin + A_skin * (cx_skin - x_na_new) ** 2) + Ecore * (Iyyc_core + A_core * (cx_core - x_na_new) ** 2) + EIyy_t + EIyy_r
+            EIxy_new = Eface * (Ixyc_skin + A_skin * (cx_skin - x_na_new) * (cy_skin - y_na_new)) + Ecore * (Ixyc_core + A_core * (cx_core - x_na_new) * (cy_core - y_na_new)) + EIxy_t + EIxy_r
+            kx_new, ky_new = _solve_coupled_curvature(mx, my, EIxx_new, EIyy_new, EIxy_new)
+
+            scale_k = max(float(np.nanmax(np.abs(kx_new))), float(np.nanmax(np.abs(ky_new))), 1.0)
+            scale_na = max(float(np.nanmax(np.abs(x_na_new))), float(np.nanmax(np.abs(y_na_new))), 1.0)
+            delta_k = max(float(np.nanmax(np.abs(kx_new - kx))), float(np.nanmax(np.abs(ky_new - ky)))) / scale_k
+            delta_na = max(float(np.nanmax(np.abs(x_na_new - x_na))), float(np.nanmax(np.abs(y_na_new - y_na)))) / scale_na
+            state_stable = choose_top_prev is not None and not np.any(choose_top != choose_top_prev)
+
+            x_na = x_na_new
+            y_na = y_na_new
+            EIxx = EIxx_new
+            EIyy = EIyy_new
+            EIxy = EIxy_new
+            kx = kx_new
+            ky = ky_new
+            choose_top_prev = choose_top
+            if state_stable and delta_k <= 1e-10 and delta_na <= 1e-10:
+                break
     else:
         xr_all = np.zeros((n, 0), dtype=float)
         yr_all = np.zeros((n, 0), dtype=float)
         E_r_eff = np.zeros((n, 0), dtype=float)
-
-    EA_r = E_r_eff * A_r if nr else np.zeros((n, 0))
-    EA = EA_base + np.sum(EA_r, axis=1)
-    EA_safe = np.where(EA > EPS, EA, np.nan)
-
-    x_na = (Eface * A_skin * cx_skin + Ecore * A_core * cx_core + np.sum(EA_t * xt_all, axis=1) + np.sum(EA_r * xr_all, axis=1)) / EA_safe
-    y_na = (Eface * A_skin * cy_skin + Ecore * A_core * cy_core + np.sum(EA_t * yt_all, axis=1) + np.sum(EA_r * yr_all, axis=1)) / EA_safe
-
-    EIxx_t = np.sum(active * (tube["E"][None, :] * (tube["I"][None, :] + tube["A"][None, :] * (yt_all - y_na[:, None]) ** 2)), axis=1) if nt else 0.0
-    EIyy_t = np.sum(active * (tube["E"][None, :] * (tube["I"][None, :] + tube["A"][None, :] * (xt_all - x_na[:, None]) ** 2)), axis=1) if nt else 0.0
-    EIxx_r = np.sum(E_r_eff * A_r * (yr_all - y_na[:, None]) ** 2, axis=1) if nr else 0.0
-    EIyy_r = np.sum(E_r_eff * A_r * (xr_all - x_na[:, None]) ** 2, axis=1) if nr else 0.0
-
-    EIxx = Eface * (Ixxc_skin + A_skin * (cy_skin - y_na) ** 2) + Ecore * (Ixxc_core + A_core * (cy_core - y_na) ** 2) + EIxx_t + EIxx_r
-    EIyy = Eface * (Iyyc_skin + A_skin * (cx_skin - x_na) ** 2) + Ecore * (Iyyc_core + A_core * (cx_core - x_na) ** 2) + EIyy_t + EIyy_r
-
-    kx = np.divide(mx, EIxx, out=np.zeros_like(mx), where=EIxx > EPS)
-    ky = np.divide(my, EIyy, out=np.zeros_like(my), where=EIyy > EPS)
+        EA_r = np.zeros((n, 0), dtype=float)
+        x_na = x_na_base.copy()
+        y_na = y_na_base.copy()
+        EIxx = EIxx_base.copy()
+        EIyy = EIyy_base.copy()
+        EIxy = EIxy_base.copy()
+        kx = kx_base.copy()
+        ky = ky_base.copy()
 
     tube_sigma = np.where(
         active,
@@ -540,6 +602,43 @@ def wing_span_analysis(
     ) if nt else np.zeros((n, 0))
     tube_yield = np.where(active, np.abs(tube_sigma) / np.maximum(tube["sigma_y"][None, :], EPS), 0.0) if nt else np.zeros((n, 0))
     tube_yield_max = np.max(tube_yield, axis=1) if nt else np.zeros(n, dtype=float)
+    if nt:
+        active_root = active[0]
+        sigma_root_tube_only = np.zeros(nt, dtype=float)
+        yield_root_tube_only = np.zeros(nt, dtype=float)
+        y_na_root_tube_only = float("nan")
+        EIxx_root_tube_only = 0.0
+        kx_root_tube_only = 0.0
+        max_yield_root_tube_only = float("inf") if abs(mx[0]) > EPS else 0.0
+        gov_tube_root_tube_only = -1
+        if np.any(active_root):
+            E_root = tube["E"][active_root]
+            A_root = tube["A"][active_root]
+            I_root = tube["I"][active_root]
+            y_root = yt_all[0, active_root]
+            EA_root = float(np.sum(E_root * A_root))
+            if EA_root > EPS:
+                y_na_root_tube_only = float(np.sum(E_root * A_root * y_root) / EA_root)
+                EIxx_root_tube_only = float(np.sum(E_root * (I_root + A_root * (y_root - y_na_root_tube_only) ** 2)))
+            if EIxx_root_tube_only > EPS:
+                kx_root_tube_only = float(mx[0] / EIxx_root_tube_only)
+                sigma_active = E_root * (kx_root_tube_only * (y_root - y_na_root_tube_only))
+                sigma_root_tube_only[active_root] = sigma_active
+                yield_active = np.abs(sigma_active) / np.maximum(tube["sigma_y"][active_root], EPS)
+                yield_root_tube_only[active_root] = yield_active
+                if yield_active.size:
+                    max_yield_root_tube_only = float(np.max(yield_active))
+                    gov_tube_root_tube_only = int(np.where(active_root)[0][int(np.argmax(yield_active))])
+            elif abs(mx[0]) <= EPS:
+                max_yield_root_tube_only = 0.0
+    else:
+        sigma_root_tube_only = np.zeros(0, dtype=float)
+        yield_root_tube_only = np.zeros(0, dtype=float)
+        y_na_root_tube_only = float("nan")
+        EIxx_root_tube_only = 0.0
+        kx_root_tube_only = 0.0
+        max_yield_root_tube_only = float("inf") if abs(mx[0]) > EPS else 0.0
+        gov_tube_root_tube_only = -1
     rov_sigma = E_r_eff * (kx[:, None] * (yr_all - y_na[:, None]) + ky[:, None] * (xr_all - x_na[:, None])) if nr else np.zeros((n, 0))
     rov_allow = np.where(rov_sigma >= 0.0, rov["sigma_tension"][None, :], rov["sigma_compression"][None, :]) if nr else np.zeros((n, 0))
     rov_yield = np.abs(rov_sigma) / np.maximum(rov_allow, EPS) if nr else np.zeros((n, 0))
@@ -720,7 +819,7 @@ def wing_span_analysis(
         "Mx": mx,
         "My": my,
         "neutral_axis": {"x": x_na, "y": y_na},
-        "EI": {"xx": EIxx, "yy": EIyy},
+        "EI": {"xx": EIxx, "yy": EIyy, "xy": EIxy},
         "curvature": {"kx": kx, "ky": ky},
         "beam": {
             "shear": load["V"],
@@ -739,6 +838,7 @@ def wing_span_analysis(
             "core_min": core_sig_min,
             "core_max": core_sig_max,
             "tube": tube_sigma,
+            "tube_root_only_bending": sigma_root_tube_only.copy(),
             "roving": rov_sigma,
             "roving_count": rov_count,
         },
@@ -746,6 +846,7 @@ def wing_span_analysis(
             "skin": skin_yield,
             "core": core_yield,
             "tube": tube_yield,
+            "tube_root_only_bending": yield_root_tube_only.copy(),
             "roving": rov_yield,
             "roving_names": rov["names"],
             "max": yield_max,
@@ -777,6 +878,18 @@ def wing_span_analysis(
         "pass": {
             "yield": bool(np.nanmax(yield_max) <= 1.0),
             "wrinkling": bool(np.nanmax(wrinkling_index) <= 1.0),
+        },
+        "root_tube_only_bending": {
+            "Mx": float(mx[0]),
+            "neutral_axis_y": float(y_na_root_tube_only),
+            "EIxx": float(EIxx_root_tube_only),
+            "curvature_kx": float(kx_root_tube_only),
+            "tube_sigma": sigma_root_tube_only.copy(),
+            "tube_yield_index": yield_root_tube_only.copy(),
+            "max_yield_index": float(max_yield_root_tube_only),
+            "min_fos": float(np.inf if max_yield_root_tube_only <= EPS else 1.0 / max_yield_root_tube_only),
+            "governing_tube_index": int(gov_tube_root_tube_only),
+            "pass": bool(max_yield_root_tube_only <= 1.0),
         },
     }
 
@@ -832,13 +945,15 @@ def wing_beam_failure(
     )
     return {
         "neutral_axis": {"x": float(out["neutral_axis"]["x"][0]), "y": float(out["neutral_axis"]["y"][0])},
-        "EI": {"xx": float(out["EI"]["xx"][0]), "yy": float(out["EI"]["yy"][0])},
+        "EI": {"xx": float(out["EI"]["xx"][0]), "yy": float(out["EI"]["yy"][0]), "xy": float(out["EI"]["xy"][0])},
         "tube_stress": out["stress"]["tube"][0].copy(),
+        "tube_stress_root_only_bending": out["stress"]["tube_root_only_bending"].copy(),
         "roving_stress": out["stress"]["roving"][0].copy(),
         "yield_index": {
             "skin": float(out["yield_index"]["skin"][0]),
             "core": float(out["yield_index"]["core"][0]),
             "tube": out["yield_index"]["tube"][0].copy(),
+            "tube_root_only_bending": out["yield_index"]["tube_root_only_bending"].copy(),
             "roving": out["yield_index"]["roving"][0].copy(),
             "roving_names": out["yield_index"]["roving_names"].copy(),
             "max": float(out["yield_index"]["max"][0]),
@@ -857,6 +972,18 @@ def wing_beam_failure(
             "governing": float(out["factor_of_safety"]["governing"][0]),
             "governing_x": float(out["factor_of_safety"]["governing_min_x"]),
             "governing_mode": str(out["factor_of_safety"]["governing_mode"]),
+        },
+        "root_tube_only_bending": {
+            "Mx": float(out["root_tube_only_bending"]["Mx"]),
+            "neutral_axis_y": float(out["root_tube_only_bending"]["neutral_axis_y"]),
+            "EIxx": float(out["root_tube_only_bending"]["EIxx"]),
+            "curvature_kx": float(out["root_tube_only_bending"]["curvature_kx"]),
+            "tube_sigma": out["root_tube_only_bending"]["tube_sigma"].copy(),
+            "tube_yield_index": out["root_tube_only_bending"]["tube_yield_index"].copy(),
+            "max_yield_index": float(out["root_tube_only_bending"]["max_yield_index"]),
+            "min_fos": float(out["root_tube_only_bending"]["min_fos"]),
+            "governing_tube_index": int(out["root_tube_only_bending"]["governing_tube_index"]),
+            "pass": bool(out["root_tube_only_bending"]["pass"]),
         },
         "pass": {"yield": bool(out["yield_index"]["max"][0] <= 1.0), "wrinkling": bool(out["wrinkling"]["index"][0] <= 1.0)},
     }
@@ -1341,7 +1468,7 @@ def optimize_roving_counts(
 
 def run_dae21_example(plot: bool = True):
     # ---------- Replace these first ----------
-    CHORD_IN = 10.25
+    CHORD_IN = 12
     SPAN_IN = 15.0 * 12.0
     ACC =-3
     TOTAL_LIFT_LBF = 50*ACC*1.5
@@ -1352,8 +1479,8 @@ def run_dae21_example(plot: bool = True):
     E_FACE_PSI = 2.70e6
     SIGMA_Y_FACE_PSI = 7.0e4
 
-    E_CORE_PSI = 200
-    G_CORE_PSI = 300
+    E_CORE_PSI = 4488
+    G_CORE_PSI = 4488*1.5
     SIGMA_Y_CORE_PSI = 2.7e1
     K_WR = 0.76
 
@@ -1413,7 +1540,6 @@ def run_dae21_example(plot: bool = True):
     ya_t, ya_b = _y_bounds_at_x(xaf, yaf, X_AFT)
     tubes = [
         {"x": X_QC, "y": 0.5 * (yq_t + yq_b), "od": TUBE1_OD_IN, "id": TUBE1_ID_IN, "E": E_TUBE1_PSI, "sigma_y": SIGMA_Y_TUBE1_PSI, "nu": NU_TUBE1, "length_from_root": TUBE_LENGTH_IN},
-        {"x": X_MID, "y": 0.5 * (ym_t + ym_b), "od": TUBE1_OD_IN, "id": TUBE1_ID_IN, "E": E_TUBE1_PSI, "sigma_y": SIGMA_Y_TUBE1_PSI, "nu": NU_TUBE1, "length_from_root": TUBE_LENGTH_IN},
         {"x": X_AFT, "y": 0.5 * (ya_t + ya_b), "od": TUBE2_OD_IN, "id": TUBE2_ID_IN, "E": E_TUBE2_PSI, "sigma_y": SIGMA_Y_TUBE2_PSI, "nu": NU_TUBE2, "length_from_root": TUBE_LENGTH_IN},
     ]
     rovings = {
@@ -1574,6 +1700,10 @@ def run_dae21_example(plot: bool = True):
     print(f"FOS(yield) min = {np.nanmin(out['factor_of_safety']['yield']):.6g}")
     print(f"FOS(wrinkling) min = {np.nanmin(out['factor_of_safety']['wrinkling']):.6g}")
     print(f"FOS(governing) min = {out['factor_of_safety']['governing_min']:.6g} at y = {out['factor_of_safety']['governing_min_y']:.3f} in, x = {out['factor_of_safety']['governing_min_x']:.3f} in ({out['factor_of_safety']['governing_mode']})")
+    rt = out["root_tube_only_bending"]
+    gov_tube = int(rt["governing_tube_index"])
+    gov_tube_label = f"tube {gov_tube + 1}" if gov_tube >= 0 else "none"
+    print(f"Root tube-only bending: max yield index = {rt['max_yield_index']:.6g} ({gov_tube_label}), min FOS = {rt['min_fos']:.6g}, pass={rt['pass']}")
     print(f"Tip twist = {out['beam']['twist_deg'][-1]:.6g} deg")
     rm = roving_mass_from_output(out, linear_density_g_per_m=ROVING_LINEAR_DENSITY_G_PER_M, both_wings=True)
     print(f"Roving mass total = {rm['total_g']:.6g} g ({rm['total_lb']:.6g} lb)")

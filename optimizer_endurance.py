@@ -946,7 +946,7 @@ def _example_run():
         levelFlightMargin=1.25,
         cruiseVelocityMode=cruise_velocity_mode,
         res=1,
-        seed=20,
+        seed=21,
         maxiter=50,
         popsize=20,
         polish=False,

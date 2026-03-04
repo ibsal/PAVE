@@ -524,7 +524,7 @@ class Aircraft:
 altitude          = 200
 wingFoil          = PolarSet.from_folder("./PyFoil/polars", airfoil="psu94097")
 tailFoil          = PolarSet.from_folder("./PyFoil/polars", airfoil="S9033")
-arealDensityMain  = 3.05   # kg/m^2
+arealDensityMain  = 2.05   # kg/m^2
 arealDensityH     = 1.5    # kg/m^2
 arealDensityV     = 1.5    # kg/m^2
 baseMass          = 17.5   # kg
@@ -538,7 +538,7 @@ body             = Fuselage(1.0541, 0.3048, 0.21336, 0.9, 0.00635e-3, 0.3)
 booms            = Fuselage(1.4, 0.03, 0.03, 1, 0.00635e-3, 0.05)
 batteryElectric  = Powerplant(7992000, 0.59, 4000)
 fuselages        = [body, booms, booms]
-
+'''
 design_point = x = [
     4.4914820,  # wingSpan (m)   = 176.830 in
     0.2614676,  # wingChord (m)  = 10.294 in
@@ -549,6 +549,8 @@ design_point = x = [
     1.481,      # wingIncidence (deg)
     1.800,      # tailIncidence (deg)
 ]
+'''
+design_point = x = [4.5719554,  0.3127835,  0.31398831, 0.78371218, 0.1929609,  1.72966979, 1.83076884, 0.65283898]
 default_wing_incidence = 1.964
 default_tail_incidence = -0.1864
 default_vtail_volume   = 0.03
